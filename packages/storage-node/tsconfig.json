@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // 与 packages/shared 不同：这个包的源码本来就是 Node 代码，
+    // 所以主配置也要开 node 类型，而不是把 node 类型只留给测试。
+    "types": ["node"]
+  },
+  "include": ["src"],
+  "exclude": ["src/**/*.test.ts"]
+}

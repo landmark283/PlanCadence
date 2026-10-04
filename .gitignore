@@ -1,0 +1,16 @@
+node_modules/
+.pnpm-store/
+.npm-cache/
+.playwright/
+.dev/vendor/
+.dev/scratch/
+outputs/
+.expo/
+dist/
+web-build/
+*.log
+*.tsbuildinfo
+.DS_Store
+.env
+.env.local
+/tools/

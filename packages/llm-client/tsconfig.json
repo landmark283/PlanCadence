@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // 这个包需要 fetch / Response / AbortController / setTimeout 这些全局。
+    // 它们由 @types/node 声明。刻意不放进 packages/shared：
+    // 那边维持「无 DOM、无 Node 类型」的护栏，保证共享逻辑真的能在 Hermes 上跑。
+    "types": ["node"]
+  },
+  "include": ["src"],
+  "exclude": ["src/**/*.test.ts"]
+}

@@ -1,0 +1,24 @@
+{
+  "name": "@sp/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/index.ts",
+    "start": "node src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --experimental-test-isolation=none \"src/**/*.test.ts\""
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.3.0",
+    "@sp/env-node": "workspace:*",
+    "@sp/llm-client": "workspace:*",
+    "@sp/shared": "workspace:*",
+    "fastify": "^5.12.5",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "typescript": "~6.0.3"
+  }
+}

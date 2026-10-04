@@ -1,0 +1,12 @@
+packages:
+  - 'apps/*'
+  - 'packages/*'
+
+# 新增 workspace 包时 pnpm 需要重建 node_modules；非 TTY（AI/CI）环境下默认中止并报
+# ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY。pnpm 10+ 的设置在 pnpm-workspace.yaml，
+# 写在 .npmrc 里不生效——两处都留着以防 pnpm 改回读取位置。
+confirmModulesPurge: false
+
+# React Native 生态的 peerDependencies 普遍滞后（例如尚未声明支持 React 19），
+# 严格模式会让安装直接失败。保持宽松，但每次安装后要留意 pnpm 打印的 peer 警告。
+strictPeerDependencies: false

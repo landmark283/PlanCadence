@@ -1,0 +1,26 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    // workspace 共享包（@sp/shared）内部用显式 .ts 后缀导入（Node ESM 与
+    // node:test 都要求显式扩展名）。这里必须同步开启，否则 tsc 跟着进
+    // packages/shared 就报 TS5097。noEmit 是该选项的前置条件——Metro 负责
+    // 转译，tsc 只做类型检查，不产出文件。
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "paths": {
+      "@/*": [
+        "./src/*"
+      ],
+      "@/assets/*": [
+        "./assets/*"
+      ]
+    }
+  },
+  "include": [
+    "**/*.ts",
+    "**/*.tsx",
+    ".expo/types/**/*.ts",
+    "expo-env.d.ts"
+  ]
+}

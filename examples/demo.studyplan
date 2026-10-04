@@ -1,0 +1,244 @@
+# studyplan/v1 —— 示例计划文件
+# 语法是 YAML 子集（内联映射 + 块序列），因此任何 YAML 编辑器/高亮都能用。
+# 但语义是本项目自定义的：字段含义、状态机、不变量见 packages/shared/src/plan/schema.ts。
+# 文件后缀刻意用 .studyplan 而不是 .yaml，以便系统识别归属、并在导入时做版本迁移。
+
+schema: studyplan/v1
+id: plan_czw01
+version: 5
+
+meta:
+  title: 蓝桥杯省赛备赛计划
+  created: '2026-10-06T20:15:00+08:00'
+  updated: '2026-10-19T21:45:00+08:00'
+  origin: phone-czw
+
+goal:
+  # 保留学生原话，不要 AI 改写——复盘页要原样回显
+  statement: 明年四月能独立做出省赛中等难度的题，别再一看到 DP 就放弃
+  successCriteria:
+    - 独立 AC 30 道中等难度题（不看题解）
+    - 能说清 01 背包、完全背包、区间 DP 的适用场景
+    - 完整参加一次校内模拟赛
+  deadline: '2027-04-11'
+  priority: high
+
+constraints:
+  weeklyMinutes: 600
+  # 四个时段合计 600 分钟，与 weeklyMinutes 一致。
+  # （之前只有三个时段共 420 分钟，和 600 的周预算对不上——
+  #   引擎按 600 排期，学生实际只有 420 分钟可用，排出来的计划必然是假的。）
+  availableSlots:
+    - { day: mon, from: '19:00', to: '21:00' }
+    - { day: wed, from: '19:00', to: '21:00' }
+    - { day: sat, from: '09:00', to: '12:00' }
+    - { day: sun, from: '09:00', to: '12:00' }
+  maxSessionMinutes: 90
+  blackouts:
+    - { from: '2026-11-02', to: '2026-11-06', reason: 期中考试周 }
+
+competences:
+  - id: c_dp
+    name: 动态规划
+    target: 0.8
+    current: 0.25
+    evidence: [t_dp01]
+  - id: c_graph
+    name: 图论基础
+    target: 0.7
+    current: 0.1
+    evidence: []
+
+milestones:
+  - id: m_base
+    title: 基础算法巩固
+    due: '2026-11-30'
+    competenceIds: [c_dp]
+    status: active
+    criteria:
+      - 背包问题三种变体能独立写出
+      - 能在 10 分钟内判断一道题是不是 DP
+  - id: m_graph
+    title: 图论入门
+    due: '2026-12-31'
+    competenceIds: [c_graph]
+    status: pending
+    criteria:
+      - 掌握 DFS/BFS 模板
+      - 会用并查集
+
+tasks:
+  - id: t_dp00
+    title: 看 OI Wiki 动态规划总览
+    milestoneId: m_base
+    dependsOn: []
+    estimateMin: 45
+    type: read
+    status: done
+    scheduledFor: '2026-10-07'
+    actualMin: 40
+    difficulty: 0.3
+    resourceIds: [r_oiwiki_dp]
+    notes: 看完还是不太懂状态转移怎么想
+
+  - id: t_dp01
+    title: 01 背包手推 5 遍 + 做 3 道模板题
+    milestoneId: m_base
+    dependsOn: [t_dp00]
+    estimateMin: 120
+    type: practice
+    status: done
+    scheduledFor: '2026-10-12'
+    actualMin: 165
+    difficulty: 0.6
+    resourceIds: [r_luogu_knapsack]
+    notes: 一维数组滚动的写法总算记住了，但完全背包还是混
+
+  - id: t_rev_dp
+    title: 复习：背包三变体回忆默写
+    milestoneId: m_base
+    dependsOn: [t_dp01]
+    estimateMin: 25
+    type: review
+    status: todo
+    scheduledFor: '2026-10-19'
+    actualMin: null
+    difficulty: null
+    resourceIds: []
+    notes: 由间隔重复算法自动插入
+
+  - id: t_dp02
+    title: 完全背包 + 多重背包对比练习
+    milestoneId: m_base
+    dependsOn: [t_dp01]
+    estimateMin: 90
+    type: practice
+    status: doing
+    scheduledFor: '2026-10-21'
+    actualMin: null
+    difficulty: null
+    resourceIds: []
+    notes: ''
+
+  - id: t_dp05
+    title: 限时模拟：2 道背包综合题
+    milestoneId: m_base
+    dependsOn: [t_dp02]
+    estimateMin: 90
+    type: assess
+    status: todo
+    scheduledFor: '2026-10-24'
+    actualMin: null
+    difficulty: null
+    resourceIds: [r_luogu_knapsack]
+    notes: 掐表做，中途不看题解
+
+  - id: t_dp06
+    title: 背包错题重做（一维滚动写错的那些）
+    milestoneId: m_base
+    dependsOn: [t_dp02]
+    estimateMin: 60
+    type: practice
+    status: todo
+    scheduledFor: '2026-10-25'
+    actualMin: null
+    difficulty: null
+    resourceIds: []
+    notes: ''
+
+  - id: t_graph00
+    title: OI Wiki 图论：邻接表与 BFS 模板
+    milestoneId: m_graph
+    dependsOn: []
+    estimateMin: 60
+    type: read
+    status: todo
+    scheduledFor: '2026-10-25'
+    actualMin: null
+    difficulty: null
+    resourceIds: [r_oiwiki_graph]
+    notes: 先看懂模板，默写留到下一阶段
+
+  - id: t_dp03
+    title: 区间 DP 入门 3 题
+    milestoneId: m_base
+    dependsOn: [t_dp05]
+    estimateMin: 120
+    type: practice
+    status: todo
+    scheduledFor: '2026-10-26'
+    # 学生手动挪到 10-26 以避开期中考试周 —— 上锁后引擎不会再把它改回去
+    pinned: true
+    actualMin: null
+    difficulty: null
+    resourceIds: []
+    notes: 自己挪的：和期中考试周错开
+
+  - id: t_graph01
+    title: DFS/BFS 模板默写 + 5 道水题
+    milestoneId: m_graph
+    dependsOn: [t_graph00]
+    estimateMin: 100
+    type: practice
+    status: todo
+    scheduledFor: null
+    # 学生明说「等期中考试周之后再安排」。期中考试周是 11-02~11-06，
+    # 所以最早可安排日设在其后的第一个周一。以前这只写在 notes 里，引擎读不懂。
+    notBefore: '2026-11-09'
+    actualMin: null
+    difficulty: null
+    resourceIds: []
+    notes: 待排——等期中考试周之后再安排
+
+resources:
+  - id: r_oiwiki_dp
+    title: OI Wiki · 动态规划
+    url: 'https://oi-wiki.org/dp/'
+    kind: article
+    verifiedAt: '2026-10-19T00:00:00+08:00'
+    source: 资料库快照@2026-10-19
+    deadline: null
+  - id: r_luogu_knapsack
+    title: 洛谷题单 · 背包问题
+    url: 'https://www.luogu.com.cn/training/list'
+    kind: problem_set
+    verifiedAt: '2026-10-19T00:00:00+08:00'
+    source: 资料库快照@2026-10-19
+    deadline: null
+  - id: r_oiwiki_graph
+    title: OI Wiki · 图论基础
+    url: 'https://oi-wiki.org/graph/'
+    kind: article
+    verifiedAt: '2026-10-19T00:00:00+08:00'
+    source: 资料库快照@2026-10-19
+    deadline: null
+  - id: r_contest_sim
+    # 截止日不再写在标题里（"…（报名截止 2026-11-15）"）——那是给人看的文本，
+    # 机器读不出来就算不出倒计时。见 schema.ts 里 Resource.deadline 的注释。
+    #
+    # source 写「校内通知」而不是某个工具名：这条本来就是虚构的演示数据
+    # （url 是 example.edu.cn），而**它的来源标签不该指向一个我们并不存在的工具**。
+    # 资料库里那三条同理，标签统一成程序真正会写进去的那个（资料库快照@日期）。
+    title: 校内模拟赛
+    url: 'https://example.edu.cn/contest/2026-sim'
+    kind: contest
+    verifiedAt: '2026-10-19T21:35:00+08:00'
+    source: 校内通知
+    deadline: '2026-11-15'
+
+reviews:
+  - at: '2026-10-19T21:40:00+08:00'
+    plannedTasks: 3
+    completedTasks: 2
+    loadFeedback: 0.62
+    notes: 比预想吃力，背包卡了很久
+    adjustments:
+      - '把「区间 DP 入门」从 10-22 推到 10-26，避开期中考试周'
+      - '为「完全背包」补一条 25 分钟复习任务'
+
+history:
+  - { at: '2026-10-06T20:15:00+08:00', cmd: 'plan.create', summary: '由访谈生成初版计划（v1）' }
+  - { at: '2026-10-12T22:05:00+08:00', cmd: 'task.setStatus', summary: '任务「01 背包手推 5 遍」→ done' }
+  - { at: '2026-10-19T21:36:00+08:00', cmd: 'resource.add', summary: '新增资源「校内模拟赛」' }
+  - { at: '2026-10-19T21:40:00+08:00', cmd: 'plan.applyAdjustments', summary: '应用了 2 项调整' }
+  - { at: '2026-10-19T21:45:00+08:00', cmd: 'task.add', summary: '补充本周任务：限时模拟、错题重做、图论入门' }

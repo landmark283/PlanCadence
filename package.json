@@ -1,0 +1,21 @@
+{
+  "name": "study-plan-assistant",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "typecheck": "pnpm -r --if-present typecheck && tsc --noEmit -p tsconfig.tools.json",
+    "test": "pnpm -r --if-present test",
+    "mobile": "node .dev/dev-mobile.mjs",
+    "plan": "node tools/plan-cli.ts"
+  },
+  "devDependencies": {
+    "@sp/env-node": "workspace:*",
+    "@sp/llm-client": "workspace:*",
+    "@sp/shared": "workspace:*",
+    "@sp/storage-node": "workspace:*",
+    "@types/node": "^22.19.0",
+    "playwright": "^1.63.0",
+    "typescript": "~6.0.3"
+  }
+}
