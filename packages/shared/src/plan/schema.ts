@@ -57,6 +57,7 @@ export type TaskType = z.infer<typeof TaskType>;
 
 export const Priority = z.enum(['low', 'medium', 'high']);
 export const MilestoneStatus = z.enum(['pending', 'active', 'done', 'dropped']);
+export type MilestoneStatus = z.infer<typeof MilestoneStatus>;
 export const ResourceKind = z.enum(['article', 'video', 'course', 'book', 'problem_set', 'contest', 'tool']);
 export type ResourceKind = z.infer<typeof ResourceKind>;
 
@@ -405,15 +406,26 @@ export function validatePlan(plan: PlanFile): PlanIssue[] {
       issues.push({
         level: 'warn',
         path: `week:${week}`,
-        message: `排期 ${min} 分钟，超出周预算 ${plan.constraints.weeklyMinutes} 分钟`,
+        message: `${week} 这一周排了 ${min} 分钟，超出周预算 ${plan.constraints.weeklyMinutes} 分钟`,
       });
 
-  // 5) 排期落在 blackout 内
+  /**
+   * 5) 排期落在 blackout 内
+   *
+   * 下面这几条任务级警告都**带上任务标题**。原来只报事实（「排期落在不可用区间
+   * 11-02~11-06」），而 `path` 里那个 `task:t_dp00` 是给学生看不见的内部 id——
+   * 于是学生在提醒列表里读到一句话，却不知道说的是哪一项，也就没法处理。
+   * 提醒的价值全在「知道该动哪一项」，所以主语不能省。
+   */
   for (const t of plan.tasks) {
     if (!t.scheduledFor) continue;
     for (const b of plan.constraints.blackouts)
       if (t.scheduledFor >= b.from && t.scheduledFor <= b.to)
-        issues.push({ level: 'warn', path: `task:${t.id}`, message: `排期落在不可用区间 ${b.from}~${b.to}` });
+        issues.push({
+          level: 'warn',
+          path: `task:${t.id}`,
+          message: `「${t.title}」的排期落在不可用区间 ${b.from}~${b.to}`,
+        });
   }
 
   // 5b) 排期早于学生指定的「最早可安排日」——这是学生明说过的意愿，违反它必须报出来
@@ -422,7 +434,7 @@ export function validatePlan(plan: PlanFile): PlanIssue[] {
       issues.push({
         level: 'warn',
         path: `task:${t.id}`,
-        message: `排期 ${t.scheduledFor} 早于最早可安排日 ${t.notBefore}`,
+        message: `「${t.title}」排在 ${t.scheduledFor}，早于你设的最早可安排日 ${t.notBefore}`,
       });
   }
 
@@ -432,7 +444,11 @@ export function validatePlan(plan: PlanFile): PlanIssue[] {
     for (const d of t.dependsOn) {
       const dep = plan.tasks.find((x) => x.id === d);
       if (dep?.scheduledFor && dep.scheduledFor > t.scheduledFor)
-        issues.push({ level: 'warn', path: `task:${t.id}`, message: `排在前置任务 ${d} 之前` });
+        issues.push({
+          level: 'warn',
+          path: `task:${t.id}`,
+          message: `「${t.title}」排在前置任务「${dep.title}」之前`,
+        });
     }
   }
 
@@ -465,7 +481,7 @@ export function validatePlan(plan: PlanFile): PlanIssue[] {
         issues.push({
           level: 'warn',
           path: `task:${t.id}`,
-          message: `排期 ${t.scheduledFor} 晚于目标截止日 ${plan.goal.deadline}`,
+          message: `「${t.title}」的排期 ${t.scheduledFor} 晚于目标截止日 ${plan.goal.deadline}`,
         });
     }
   }
@@ -489,7 +505,7 @@ export function validatePlan(plan: PlanFile): PlanIssue[] {
       issues.push({
         level: 'warn',
         path: `task:${t.id}`,
-        message: `排期 ${t.scheduledFor} 晚于「${m.title}」的截止日 ${m.due}`,
+        message: `「${t.title}」的排期 ${t.scheduledFor} 晚于「${m.title}」的截止日 ${m.due}`,
       });
     }
   }

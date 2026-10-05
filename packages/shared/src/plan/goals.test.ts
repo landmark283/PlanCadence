@@ -405,6 +405,41 @@ describe('复盘分开对每条线说话', () => {
     assert.equal(warns.length >= 1, true, '应该警告这条排期晚于它自己那条线的截止日');
   });
 
+  /**
+   * 一项任务可以**同时**踩中好几条校验，而它们的 `path` 一模一样。
+   *
+   * 这不是假设：排在总截止日之后、又排在它自己那条线的截止日之后、还落在
+   * 不可用区间里，就会得到三条 `path: task:t_xx`。界面拿 `path` 当 React key
+   * 会直接撞（`Encountered two children with the same key`），而这个项目
+   * 已经因为「拿警告文本当 key」炸过一次。
+   *
+   * 所以这条用例钉的是**界面必须知道的事**：`path` 不唯一，key 得自己造。
+   */
+  it('同一个任务的几条警告会共用同一个 path —— 界面不能拿 path 当 key', () => {
+    const p = planWithTwoLines();
+    const blue = p.milestones.find((m) => m.title === '蓝桥杯省赛');
+    assert.ok(blue);
+    const t = p.tasks.find((x) => x.milestoneId === blue.id);
+    assert.ok(t);
+
+    // 一次性推到：总截止日之后（2027-04-11）且落在考试周里（11-02~11-06）之外——
+    // 直接推到 2027-05-01，那既晚于总截止日也晚于蓝桥杯的 12-31
+    const r = applyCommand(p, {
+      type: 'plan.applyAdjustments',
+      at: T0,
+      applied: [{ kind: 'taskPatch', taskId: t.id, patch: { scheduledFor: '2027-05-01' }, reason: 'r' }],
+    });
+    assert.equal(r.ok, true);
+    if (!r.ok) return;
+
+    const same = validatePlan(r.plan).filter((i) => i.level === 'warn' && i.path === `task:${t.id}`);
+    assert.equal(same.length, 2, `应该同时命中总截止日和那条线的截止日，实际 ${same.length} 条`);
+    assert.notEqual(same[0]?.message, same[1]?.message);
+
+    // 而每条都带上了任务标题 —— 提醒里没有主语的话，学生不知道说的是哪一项
+    for (const w of same) assert.match(w.message, new RegExp(t.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  });
+
   it('改一个目标的截止日写成一句人话（不是 JSON，也不显示 id）', () => {
     const p = planWithTwoLines();
     const blue = p.milestones.find((m) => m.title === '蓝桥杯省赛');

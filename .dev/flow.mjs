@@ -830,6 +830,73 @@ if ((await openDemo.count()) > 0) {
   log.push('⚠ 文件页上没有演示模式开关');
 }
 
+/* ── 13. 多目标：目标卡片 ─────────────────────────────────── *
+ * 放到最后做，因为它要**先把计划重置成示例文件**——那份文件有两条线
+ * （基础算法 11-30、图论入门 12-31），而前面走的都是访谈生成的那一份
+ * （只有一条线）。重置会改版本号，所以放在所有版本断言之后。
+ */
+await page.getByRole('tab', { name: '文件' }).click();
+await page.waitForTimeout(700);
+const resetDemo = page.getByRole('button', { name: '重置为示例计划' });
+if ((await resetDemo.count()) > 0) {
+  await resetDemo.click();
+  await page.waitForTimeout(1500);
+  await shot('101-reset-to-demo');
+
+  await page.getByRole('tab', { name: '今日' }).click();
+  await page.waitForTimeout(900);
+
+  // 入口在今日页那句总目标的右上角，**带条数**
+  const goalEntry = page.getByRole('button', { name: /^打开目标清单，现在有 \d+ 条线$/ });
+  const entryLabel = await goalEntry.first().getAttribute('aria-label').catch(() => null);
+  log.push(`今日页目标入口：${entryLabel ? `✓ ${entryLabel.replace('打开目标清单，现在有', '')}` : '⚠ 没找到'}`);
+
+  // 规划相关的提醒：示例计划里没有矛盾，所以这里只断言「没有就整块不出现」
+  const todayWarn = await page.getByText(/^提醒 · \d+ 条$/).count();
+  log.push(`今日页提醒区（示例计划）：${todayWarn ? `出现 ${todayWarn} 处` : '✓ 没有矛盾就整块不出现'}`);
+
+  if (entryLabel) {
+    await goalEntry.first().click();
+    await page.waitForTimeout(1200);
+
+    const head = await page
+      .getByText(/^\d+ 条在跑 · 共 \d+ 条/)
+      .first()
+      .textContent()
+      .catch(() => null);
+    const cards = await page.getByRole('button', { name: /，点开看细节$/ }).count();
+    log.push(`目标屏：${head ?? '⚠ 没读到页头'} · 卡片 ${cards} 张 ${cards === 2 ? '✓ 两条线各一张' : '⚠ 张数不对'}`);
+
+    // 展开一张：细节（排期 / 能力点 / 达成判据）应该在**收起时看不到**
+    const before = await page.getByText('达成判据').count();
+    await page.getByRole('button', { name: /^基础算法巩固，/ }).first().click();
+    await page.waitForTimeout(600);
+    const after = await page.getByText('达成判据').count();
+    const range = await page.getByText(/^\d+月\d+日( – \d+月\d+日)?( · 还有 \d+ 项在待排池)?$/).count();
+    log.push(`展开一张：判据 ${before} → ${after} ${after > before ? '✓ 展开才出现' : '⚠ 没变'} · 排期行 ${range} 条`);
+
+    /**
+     * 同时只展开一张：展开第二张时第一张要收起来。
+     * 展开多张之后这一屏又变回一堵墙，所以这条是刻意的行为，不是副作用。
+     */
+    await page.getByRole('button', { name: /^图论入门，/ }).first().click();
+    await page.waitForTimeout(600);
+    const stillOpen = await page.getByText('达成判据').count();
+    log.push(`再展开另一张：判据块 ${stillOpen} 个 ${stillOpen === 1 ? '✓ 同时只展开一张' : '⚠ 展开了多张'}`);
+    await shot('102-goals-expanded');
+
+    const backFromGoals = page.getByRole('button', { name: '回到今日页' });
+    if ((await backFromGoals.count()) > 0) {
+      await backFromGoals.click();
+      await page.waitForTimeout(900);
+      const home = await page.getByRole('button', { name: '打开日历，看整个月的安排' }).count();
+      log.push(`从目标屏返回：${home ? '✓ 回到今日页' : '⚠ 没回去'}`);
+    }
+  }
+} else {
+  log.push('⚠ 文件页上没有「重置为示例计划」');
+}
+
 console.log(log.join('\n'));
 console.log(`\n截图输出：${path.relative(WORKSPACE, outDir)}`);
 

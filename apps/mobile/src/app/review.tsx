@@ -37,7 +37,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ScrollView, StyleSheet, View } from 'react-native';
 import { useRouter } from 'expo-router';
-import { proposalKey, reviewFacts, reviewPlan, serializePlan, validatePlan } from '@sp/shared';
+import { proposalKey, reviewFacts, reviewPlan, serializePlan } from '@sp/shared';
 import type { Answer, QuestionSpec } from '@sp/shared';
 
 import { AppText } from '@/components/app-text';
@@ -46,6 +46,7 @@ import { Card, ChipAction, SectionHeader } from '@/components/card';
 import { Chip } from '@/components/chip';
 import { EmptyState } from '@/components/empty-state';
 import { NoticeBanner } from '@/components/notice-banner';
+import { PlanWarnings } from '@/components/plan-warnings';
 import { ProposalCard } from '@/components/proposal-card';
 import { SourceBadge } from '@/components/source-badge';
 import { QuestionControl, draftToAnswer, initDraft, isAnswerEmpty, type Draft } from '@/components/question-control';
@@ -148,7 +149,6 @@ export default function ReviewScreen() {
       dayTasks: on(selectedDay),
       /** ⑥ 只列复盘，不列结账——它们是两种记录（`Review.kind`） */
       log: plan.reviews.filter((r) => r.kind === 'review').slice(-3).reverse(),
-      warnings: validatePlan(plan).filter((i) => i.level === 'warn'),
     };
   }, [plan, today, selectedDay]);
 
@@ -423,19 +423,8 @@ export default function ReviewScreen() {
           </View>
         ) : null}
 
-        {/* ── 规划相关的警告（今日页也保留一份） ─────────── */}
-        {view.warnings.length ? (
-          <View style={styles.section}>
-            <SectionHeader>提醒 · {view.warnings.length} 条</SectionHeader>
-            <Card bordered style={styles.stack}>
-              {view.warnings.map((w) => (
-                <AppText key={`w:${w.path}`} variant="label" tone="textMuted">
-                  · {w.message}
-                </AppText>
-              ))}
-            </Card>
-          </View>
-        ) : null}
+        {/* 规划相关的警告：和今日页、目标屏是**同一个组件**（措辞一处实现） */}
+        <PlanWarnings plan={plan} />
       </ScrollView>
 
       {/* 这一屏不在标签栏里，所以底部安全区要自己留（在标签页里才传 0） */}

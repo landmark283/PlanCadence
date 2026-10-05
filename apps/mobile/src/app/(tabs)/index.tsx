@@ -17,6 +17,7 @@ import { Card, SectionHeader, ChipAction } from '@/components/card';
 import { Chip } from '@/components/chip';
 import { EmptyState } from '@/components/empty-state';
 import { NoticeBanner } from '@/components/notice-banner';
+import { PlanWarnings } from '@/components/plan-warnings';
 import { ProgressBar } from '@/components/progress-bar';
 import { ScreenHeader } from '@/components/screen-header';
 import { Screen } from '@/components/screen';
@@ -26,7 +27,7 @@ import { TaskList } from '@/components/task-list';
 import { WeekStrip, type WeekStripDay } from '@/components/week-strip';
 import { fmtFull, fmtMinutes, fmtMonthDay, startOfWeek, weekDays } from '@/lib/dates';
 import { useCountUp } from '@/hooks/use-count-up';
-import { screenPadding, space } from '@/theme';
+import { screenPadding, space, touchTarget } from '@/theme';
 import { usePlanStore } from '@/state/plan-store';
 
 export default function TodayScreen() {
@@ -123,6 +124,8 @@ export default function TodayScreen() {
   const { goal, constraints } = plan;
   const dayTasks = view.on(selectedDay);
   const budget = constraints.weeklyMinutes;
+  /** 还在跑的线有几条（已收尾的不算——「目标 5」里有 3 条做完了没有信息量） */
+  const milestoneCount = plan.milestones.filter((m) => m.status !== 'done' && m.status !== 'dropped').length;
 
   return (
     <Screen>
@@ -148,9 +151,22 @@ export default function TodayScreen() {
       >
         {/* ── 目标：学生原话，不改写 ───────────────────────── */}
         <Card style={styles.goalCard}>
-          <AppText variant="caption" tone="textFaint" style={styles.eyebrow}>
-            我的目标
-          </AppText>
+          <View style={styles.goalHead}>
+            <AppText variant="caption" tone="textFaint" style={styles.eyebrow}>
+              我的目标
+            </AppText>
+            {/*
+              「几条线」的入口。和「本周安排 ·〔日历〕」同一个模式：一屏放不下的东西
+              进独立一屏，这里只留一个带**条数**的动作位。
+              条数是刻意的——「目标 3」本身就是今日页需要的那点信息量，
+              它同时告诉你「这个计划不止一条线」。
+            */}
+            <ChipAction
+              label={milestoneCount ? `目标 ${milestoneCount}` : '目标'}
+              accessibilityLabel={`打开目标清单，现在有 ${milestoneCount} 条线`}
+              onPress={() => router.push('/goals')}
+            />
+          </View>
           <AppText variant="subtitle">{goal.statement}</AppText>
 
           <View style={styles.progressBlock}>
@@ -185,6 +201,13 @@ export default function TodayScreen() {
           // 只有「刚应用过一次会话」时才有值；学生一动别的东西它就没了
           onUndo={undoSnapshot ? undoLastApply : undefined}
         />
+
+        {/*
+          规划相关的提醒：计划自己和自己打架的地方（排期越界、超预算、前置倒挂……）。
+          和复盘页用的是**同一个组件**，所以两处说法一字不差。
+          它有独立的数据来源（`validatePlan` 现算），不依赖上面的通知条。
+        */}
+        <PlanWarnings plan={plan} />
 
         {/* ── 本周负载 ─────────────────────────────────────── */}
         <View style={styles.section}>
@@ -266,6 +289,14 @@ const styles = StyleSheet.create({
 
   goalCard: {
     gap: space.md,
+  },
+  goalHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: space.md,
+    // 动作位要 44，这一行跟着长高，否则 hitSlop 会被这行的边界裁掉
+    minHeight: touchTarget,
   },
   eyebrow: {
     letterSpacing: 0.6,
