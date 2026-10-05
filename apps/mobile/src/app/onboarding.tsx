@@ -12,7 +12,7 @@
  * 「AI 出题」和「本机题库」是两种不同的诚实说法。
  */
 import { useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, ScrollView, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, StyleSheet, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import {
   applyAnswer,
@@ -39,6 +39,7 @@ import {
 } from '@/components/question-control';
 import { HeaderAction, ScreenHeader } from '@/components/screen-header';
 import { Screen } from '@/components/screen';
+import { ScrollBody } from '@/components/scroll-body';
 import { SourceBadge } from '@/components/source-badge';
 import { StatRow } from '@/components/stat-row';
 import { draftPlan, fetchNextQuestion, type Source } from '@/lib/api';
@@ -247,7 +248,7 @@ export default function OnboardingScreen() {
         <ProgressBar value={progress} height={4} />
       </View>
 
-      <ScrollView
+      <ScrollBody
         contentContainerStyle={[styles.scroll, styles.questionScroll]}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
@@ -306,7 +307,7 @@ export default function OnboardingScreen() {
             </View>
           </View>
         ) : null}
-      </ScrollView>
+      </ScrollBody>
 
       <BottomBar>
         <AppText
@@ -356,7 +357,7 @@ function DoneView({
     <Screen>
       <ScreenHeader title="信息够了" meta={`答了 ${answered} / ${total} 题`} />
 
-      <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
+      <ScrollBody contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
         <StatRow
           items={[
             { value: `${answered}`, label: '已作答', tone: 'primary' },
@@ -399,7 +400,7 @@ function DoneView({
             </AppText>
           </Card>
         ) : null}
-      </ScrollView>
+      </ScrollBody>
 
       <BottomBar>
         <View style={styles.spacer} />

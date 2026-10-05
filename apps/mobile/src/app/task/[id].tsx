@@ -23,7 +23,7 @@
  * 提示就飘到上一屏去了，学生只会觉得「点了没反应」。
  */
 import { useMemo, useState } from 'react';
-import { ScrollView, StyleSheet, View } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import {
   ESTIMATE_STEP,
@@ -52,6 +52,7 @@ import { NoticeBanner } from '@/components/notice-banner';
 import { HeaderAction, ScreenHeader } from '@/components/screen-header';
 import { Screen } from '@/components/screen';
 import { LOAD_FULL_AT, type DayLoad } from '@/components/day-cell';
+import { ScrollBody } from '@/components/scroll-body';
 import { addDays, fmtFull, fmtMinutes, fmtMonthDay } from '@/lib/dates';
 import { screenPadding, space } from '@/theme';
 import { usePlanStore } from '@/state/plan-store';
@@ -315,7 +316,7 @@ export default function TaskEditorScreen() {
         right={<HeaderAction label="返回" accessibilityLabel="不保存，返回" onPress={goBack} />}
       />
 
-      <ScrollView
+      <ScrollBody
         contentContainerStyle={styles.scroll}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
@@ -669,7 +670,7 @@ export default function TaskEditorScreen() {
             </Card>
           </View>
         ) : null}
-      </ScrollView>
+      </ScrollBody>
 
       <BottomBar bottomInset={0}>
         <View style={styles.countBox}>

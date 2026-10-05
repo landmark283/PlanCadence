@@ -42,6 +42,7 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
+    "test": "node --test --experimental-test-isolation=none \"test/**/*.test.mjs\"",
     "lint": "expo lint"
   },
   "private": true

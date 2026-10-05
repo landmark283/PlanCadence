@@ -27,7 +27,7 @@
  * 「有 9 项没做」是这一屏唯一不能错的数字，而模型数数不可靠。
  */
 import { useEffect, useMemo, useState } from 'react';
-import { ScrollView, StyleSheet, View } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import type { SettleCarry } from '@sp/shared';
 
@@ -39,6 +39,7 @@ import { Chip } from '@/components/chip';
 import { EmptyState } from '@/components/empty-state';
 import { HeaderAction, ScreenHeader } from '@/components/screen-header';
 import { Screen } from '@/components/screen';
+import { ScrollBody } from '@/components/scroll-body';
 import { fmtMinutes, fmtMonthDay } from '@/lib/dates';
 import { animateNextLayout } from '@/lib/layout-animation';
 import { screenPadding, space } from '@/theme';
@@ -161,7 +162,7 @@ export default function SettleScreen() {
         }
       />
 
-      <ScrollView
+      <ScrollBody
         contentContainerStyle={styles.scroll}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
@@ -286,7 +287,7 @@ export default function SettleScreen() {
             })}
           </View>
         </View>
-      </ScrollView>
+      </ScrollBody>
 
       <BottomBar bottomInset={0}>
         <View style={styles.countBox}>

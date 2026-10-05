@@ -16,7 +16,7 @@ pnpm install
 Copy-Item .env.example .env      # 然后填 LLM_API_KEY
 
 # 3. 跑测试，确认环境没问题
-pnpm test                        # 应为 662 passed / 0 failed
+pnpm test                        # 应为 670 passed / 0 failed
 ```
 
 **不配 `.env` 也能完整体验**：所有涉及模型的功能都带本地兜底，只是措辞和出题不再因人而异。界面会如实标注走的是哪条路（「AI 综述」vs「系统综述」）。
@@ -129,7 +129,7 @@ pnpm mobile        # 会在终端打出二维码；也可以把打印出的 exp:
 
 ```powershell
 pnpm typecheck        # 6 个包全量类型检查
-pnpm test             # 662 个测试，零依赖（node:test）
+pnpm test             # 670 个测试，零依赖（node:test）
 
 # 命令行：看格式 / 跑引擎 / 让模型讲人话 / 写回
 pnpm plan check  examples/demo.studyplan
@@ -322,7 +322,8 @@ App **默认自动找服务端**：它从 Metro 的地址推断——Expo Go 连
 | **加了一个新目录（如 `src/app/task/`）之后，`expo start` 生成的路由类型仍然是错的** | 路由缓存是脏的：生成出来的清单会把 `src/components/*`、`packages/shared/src/plan/*` **当成路由**，而新目录里的路由根本没进去。加 `--clear` 重来一次就干净了。**判断依据：清单里出现 `/../components/...` 这种路径就是脏的** |
 | **手机上一直弹「Cannot connect to Expo CLI」** | 那是**开发期**的 HMR 警告（Metro 的 `/hot` websocket），不是 App 出错，Expo 只在「曾经连上过、后来断了」时才弹它。先看 `pnpm mobile` 打出来的「Metro HMR 回环通」在不在——在就说明 Metro 是好的，**在手机上重新加载一次**即可。单独诊断：`node .dev/probe-hmr.mjs <你的IP>` |
 | **从本机探自己的局域网地址（`http://192.168.x.x:端口`）超时** | 这个环境下就是不通，**和 Metro、和手机都无关**：实测 8081/8787 从本机都超时，连一个什么都没监听的端口也超时（Node 和 PowerShell 一样）。所以**别拿它当判据**——会误报。手机走的是另一条路（真实网卡进出）。要验的是手机能不能刷出画面 |
-| **`pnpm test` 数量对不上** | 当前是 662。数量变化本身不是问题，**有 fail 才是** |
+| **真机上弹「Each child in a list should have a unique "key" prop」，而你的 `.map` 明明都写了 key** | 那是 RN 的 `ScrollView` 干的：它在原生上**无条件**跑一遍 `React.Children.toArray`，而 `toArray` 会把没有 key 的直接子节点克隆并标成 `_store.validated = 2`——Fabric 正是为这个条件报警告。**web 上永远看不到**（RNW 的 ScrollView 不跑那句），所以别指望端到端或截图能发现它。规矩：`app/` 里一律用 `@/components/scroll-body` 的 `ScrollBody`，不要直接用 `ScrollView`（有静态检查盯着）。详见 `docs/技术方案.md` §9.18 |
+| **`pnpm test` 数量对不上** | 当前是 670。数量变化本身不是问题，**有 fail 才是** |
 | **以为 git 是退路** | `.git` 里只有一个 `init` 提交，**停在 v0.3 之前**——最近几轮改动一条都不在里面，`git checkout` 回去会得到一份几个月前的代码。要真当退路，先提交一次 |
 
 ---

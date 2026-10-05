@@ -21,7 +21,7 @@
  * 所以不可用时显示的是**空态 + 手动入口**，不是一句「出错了」。
  */
 import { useMemo, useState } from 'react';
-import { ScrollView, StyleSheet, View } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { proposalKey } from '@sp/shared';
 
@@ -35,6 +35,7 @@ import { NoticeBanner } from '@/components/notice-banner';
 import { ProposalCard } from '@/components/proposal-card';
 import { HeaderAction, ScreenHeader } from '@/components/screen-header';
 import { Screen } from '@/components/screen';
+import { ScrollBody } from '@/components/scroll-body';
 import { SourceBadge } from '@/components/source-badge';
 import { fmtFull, fmtMonthDay } from '@/lib/dates';
 import { screenPadding, space, useTokens } from '@/theme';
@@ -129,7 +130,7 @@ export default function TalkScreen() {
         }
       />
 
-      <ScrollView
+      <ScrollBody
         contentContainerStyle={styles.scroll}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
@@ -315,7 +316,7 @@ export default function TalkScreen() {
             </Card>
           </View>
         ) : null}
-      </ScrollView>
+      </ScrollBody>
 
       <BottomBar>
         {kept.length ? (

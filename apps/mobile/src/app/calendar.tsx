@@ -24,12 +24,13 @@
  *    这种自相矛盾的状态。
  */
 import { useMemo, useState } from 'react';
-import { ScrollView, StyleSheet, View } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { monthLabel, monthOf, inMonth } from '@sp/shared';
 
 import { AppText } from '@/components/app-text';
 import { CalendarPanel } from '@/components/calendar-panel';
+import { ScrollBody } from '@/components/scroll-body';
 import { SectionHeader, ChipAction } from '@/components/card';
 import { HeaderAction, ScreenHeader } from '@/components/screen-header';
 import { NoticeBanner } from '@/components/notice-banner';
@@ -128,7 +129,7 @@ export default function CalendarScreen() {
         right={<HeaderAction label="返回" accessibilityLabel="回到今日页" onPress={goBack} />}
       />
 
-      <ScrollView
+      <ScrollBody
         contentContainerStyle={styles.scroll}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
@@ -182,7 +183,7 @@ export default function CalendarScreen() {
             还有 {view.backlog.length} 项没有排期，不在日历上——它们在今日页的待排池里。
           </AppText>
         ) : null}
-      </ScrollView>
+      </ScrollBody>
     </Screen>
   );
 }

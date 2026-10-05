@@ -35,7 +35,7 @@
  * 那次跳转就把它丢了。
  */
 import { useEffect, useMemo, useState } from 'react';
-import { ScrollView, StyleSheet, View } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { proposalKey, reviewFacts, reviewPlan, serializePlan } from '@sp/shared';
 import type { Answer, QuestionSpec } from '@sp/shared';
@@ -48,6 +48,7 @@ import { EmptyState } from '@/components/empty-state';
 import { NoticeBanner } from '@/components/notice-banner';
 import { PlanWarnings } from '@/components/plan-warnings';
 import { ProposalCard } from '@/components/proposal-card';
+import { ScrollBody } from '@/components/scroll-body';
 import { SourceBadge } from '@/components/source-badge';
 import { QuestionControl, draftToAnswer, initDraft, isAnswerEmpty, type Draft } from '@/components/question-control';
 import { HeaderAction, ScreenHeader } from '@/components/screen-header';
@@ -203,7 +204,7 @@ export default function ReviewScreen() {
         }
       />
 
-      <ScrollView
+      <ScrollBody
         contentContainerStyle={styles.scroll}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
@@ -425,7 +426,7 @@ export default function ReviewScreen() {
 
         {/* 规划相关的警告：和今日页、目标屏是**同一个组件**（措辞一处实现） */}
         <PlanWarnings plan={plan} />
-      </ScrollView>
+      </ScrollBody>
 
       {/* 这一屏不在标签栏里，所以底部安全区要自己留（在标签页里才传 0） */}
       <BottomBar>

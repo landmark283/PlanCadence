@@ -11,7 +11,7 @@
  * 而不是一个"看起来已经存好了"的新版本。
  */
 import { useEffect, useState } from 'react';
-import { Platform, ScrollView, StyleSheet, View } from 'react-native';
+import { Platform, StyleSheet, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { addDays, describeProfile, exportBaseName, isDay, missingProfileFields, toIcs, toMarkdown } from '@sp/shared';
 
@@ -22,6 +22,7 @@ import { Chip, type ChipTone } from '@/components/chip';
 import { Input } from '@/components/input';
 import { ScreenHeader } from '@/components/screen-header';
 import { Screen } from '@/components/screen';
+import { ScrollBody } from '@/components/scroll-body';
 import { DEMO_PLAN_TEXT } from '@/fixtures/demo-plan';
 import { copyText } from '@/lib/clipboard';
 import { useOfflineOnly, setOfflineOnly } from '@/lib/demo-mode';
@@ -120,7 +121,7 @@ export default function FileScreen() {
         meta={plan ? `${PLAN_ID} · v${plan.version} · ${byteSize(planText)}` : '读取中…'}
       />
 
-      <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
+      <ScrollBody contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
         {/* 读不出文件时不覆盖，先把话说清楚。
             两种失败的处理相反：内容不合法时给「覆盖」按钮（学生的编辑在里面，
             不能替他扔）；存储本身坏掉时给「重试」按钮（覆盖没用，写不进去）。 */}
@@ -430,7 +431,7 @@ export default function FileScreen() {
             </AppText>
           </Card>
         </View>
-      </ScrollView>
+      </ScrollBody>
     </Screen>
   );
 }

@@ -16,12 +16,13 @@
  * 这一步的可信度，比多给两条资源重要。
  */
 import { useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { Pressable, StyleSheet, View } from 'react-native';
 
 import { AppText } from '@/components/app-text';
 import { Card, SectionLabel } from '@/components/card';
 import { Chip } from '@/components/chip';
 import { EmptyState } from '@/components/empty-state';
+import { ScrollBody } from '@/components/scroll-body';
 import { provenanceLine, ResourceCard } from '@/components/resource-card';
 import { ScreenHeader } from '@/components/screen-header';
 import { Screen } from '@/components/screen';
@@ -108,7 +109,7 @@ export default function ResourcesScreen() {
         meta={`${plan.resources.length} 条${latest ? ` · 最近校验 ${latest.slice(0, 10)}` : ''}`}
       />
 
-      <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
+      <ScrollBody contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
         {/* 主动获取的入口。放在最上面：这一页的价值就是「它真的去查了」 */}
         <Card bordered style={styles.stack}>
           <AppText variant="label" tone="textMuted">
@@ -175,7 +176,7 @@ export default function ResourcesScreen() {
             标「实时」的是刚抓回来的，标「资料库快照」的是人工核对过的固定清单。
           </AppText>
         </View>
-      </ScrollView>
+      </ScrollBody>
     </Screen>
   );
 }

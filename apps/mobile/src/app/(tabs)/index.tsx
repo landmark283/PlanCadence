@@ -8,7 +8,7 @@
  * 所以目标卡走中性面，把主色留给进度条和「选中日」——两处都表示「当前状态」。
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ScrollView, StyleSheet, View } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import type { Task } from '@sp/shared';
 
@@ -22,6 +22,7 @@ import { ProgressBar } from '@/components/progress-bar';
 import { ScreenHeader } from '@/components/screen-header';
 import { Screen } from '@/components/screen';
 import { ReviewEntry } from '@/components/review-entry';
+import { ScrollBody } from '@/components/scroll-body';
 import { TalkEntry } from '@/components/talk-entry';
 import { TaskList } from '@/components/task-list';
 import { WeekStrip, type WeekStripDay } from '@/components/week-strip';
@@ -144,7 +145,7 @@ export default function TodayScreen() {
         right={<ReviewEntry />}
       />
 
-      <ScrollView
+      <ScrollBody
         contentContainerStyle={styles.scroll}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
@@ -269,7 +270,7 @@ export default function TodayScreen() {
             />
           </View>
         ) : null}
-      </ScrollView>
+      </ScrollBody>
 
       {/* 常驻入口：说一句话改计划。它浮在内容上，所以滚动区底部留了它的高度 */}
       <TalkEntry />

@@ -21,7 +21,7 @@
  * 两者不是一回事：一个是「我想要什么」，一个是「我为此开了哪几条战线」。
  */
 import { useMemo, useState } from 'react';
-import { ScrollView, StyleSheet, View } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { detectDrift, goalProgress, unassignedTasks } from '@sp/shared';
 
@@ -33,6 +33,7 @@ import { NoticeBanner } from '@/components/notice-banner';
 import { PlanWarnings } from '@/components/plan-warnings';
 import { ScreenHeader, HeaderAction } from '@/components/screen-header';
 import { Screen } from '@/components/screen';
+import { ScrollBody } from '@/components/scroll-body';
 import { screenPadding, space } from '@/theme';
 import { usePlanStore } from '@/state/plan-store';
 
@@ -85,7 +86,7 @@ export default function GoalsScreen() {
         right={<HeaderAction label="返回" accessibilityLabel="回到今日页" onPress={goBack} />}
       />
 
-      <ScrollView
+      <ScrollBody
         contentContainerStyle={styles.scroll}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
@@ -134,7 +135,7 @@ export default function GoalsScreen() {
 
         {/* 计划自己和自己打架的地方（排期越界、超预算……），和今日页、复盘页同一份实现 */}
         <PlanWarnings plan={plan} />
-      </ScrollView>
+      </ScrollBody>
     </Screen>
   );
 }
