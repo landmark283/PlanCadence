@@ -23,15 +23,22 @@
  */
 import { z } from 'zod';
 
-import { DateStr } from '../plan/schema.ts';
-import { Proposal, validateProposal } from '../plan/proposal.ts';
+import { DateStr, Id } from '../plan/schema.ts';
 import type { PlanFile } from '../plan/schema.ts';
+import { Proposal, proposalKey, validateProposal } from '../plan/proposal.ts';
+import { placeNewTasks } from '../plan/schedule.ts';
 import { LearnerProfile, QuestionSpec } from './interview.ts';
 
 /** 一次会话最多带几轮上下文。太多轮既费 token，也没必要 */
 export const MAX_TALK_TURNS = 8;
-/** 一次最多给几条提案。再多学生就不看了 */
-export const MAX_TALK_PROPOSALS = 6;
+/**
+ * 一次最多给几条提案。再多学生就不看了。
+ *
+ * 8 而不是 6：多目标之后一次新增目标就是**一张卡**（它带的任务在卡里，
+ * 不另出卡片），但「加一条线 + 挪几条已有任务 + 改一处档案」这种组合
+ * 很容易超过 6 条，而超出的部分是**静默丢掉**的——学生不会知道自己少看了什么。
+ */
+export const MAX_TALK_PROPOSALS = 8;
 /** 最多反问几个。两个以上就开始像填表 */
 export const MAX_TALK_QUESTIONS = 2;
 /**
@@ -70,6 +77,19 @@ export const TalkInput = z.object({
   plan: z.string().min(1),
   today: DateStr,
   profile: LearnerProfile.nullable().default(null),
+  /**
+   * 目标清单（id / 名字 / 截止日）。
+   *
+   * 计划原文里当然有 `milestones`，但那是一坨 YAML。多目标场景下模型最容易犯的错
+   * 是「该改某条线的截止日，它去改了总截止日」——把这几行**人话**单独摆出来，
+   * 它照抄 id 就行。
+   *
+   * **由服务端从计划原文里填**（它本来就要 `parsePlan` 一遍），所以客户端不用发它。
+   */
+  milestones: z
+    .array(z.object({ id: Id, title: z.string(), due: DateStr.nullable() }))
+    .max(20)
+    .optional(),
   history: z.array(TalkTurn).min(1).max(MAX_TALK_TURNS),
 });
 export type TalkInput = z.infer<typeof TalkInput>;
@@ -136,6 +156,7 @@ export function resolveTalkOutput(
   let dropped = 0;
 
   const proposals: Proposal[] = [];
+  const seenKeys = new Set<string>();
   for (const raw of output.proposals) {
     if (proposals.length >= MAX_TALK_PROPOSALS) {
       dropped++;
@@ -143,6 +164,33 @@ export function resolveTalkOutput(
     }
     const parsed = Proposal.safeParse(raw);
     if (!parsed.success) {
+      dropped++;
+      /**
+       * **schema 不过也要说话。**
+       *
+       * 这一行是踩出来的：模型给的一个新增目标 schema 不过，而当时这里只
+       * `dropped++` 就过去了——界面上「一条提案都没有」，`refusals` 里也一句
+       * 解释都没有，只能靠把原始 JSON 打出来才知道是哪个字段坏了
+       * （`.dev/probe-talk-raw.mjs` 就是为此写的）。
+       *
+       * 括号里的字段路径是给排查用的；前面那句是给学生看的，措辞和
+       * `validateProposal` 那边保持一致（「我没看懂 / 我没敢动」）。
+       */
+      const issue = parsed.error.issues[0];
+      const where = issue?.path.join('.') || '顶层';
+      refusals.push(`我没看懂这一条，先跳过了（${where}）`);
+      continue;
+    }
+    /**
+     * 同一个键只留一条。
+     *
+     * 新增类提案的键是**标题**（还没有 id），而 `validateProposal` 只比对
+     * 计划里已有的目标——同一批里两条叫「蓝桥杯备赛」的提案都能过校验，
+     * 然后在 `allocateIds` 的 Map 里后一条把前一条覆盖掉：后一条拿到 id，
+     * 前一条落不到地，学生看到的是一张点了没反应的卡。
+     */
+    const key = proposalKey(parsed.data);
+    if (seenKeys.has(key)) {
       dropped++;
       continue;
     }
@@ -154,6 +202,7 @@ export function resolveTalkOutput(
       refusals.push(`我没敢动这一条：${check.reason}`);
       continue;
     }
+    seenKeys.add(key);
     proposals.push(parsed.data);
   }
 
@@ -189,10 +238,23 @@ export function resolveTalkOutput(
     proposals.length = 0;
   }
 
+  /**
+   * **最后一步：给新增的任务排出具体日期。**
+   *
+   * 模型被要求把新任务的 `scheduledFor` 留成 null，因为「哪天装得下」只有引擎
+   * 算得出来（它才知道每周有几个时段、哪些日子不可用、前置做完没有）。
+   * 这里把提案投影到一份计划副本上跑一次引擎，再把算出来的日期**写回提案本身**——
+   * 所以学生看到的仍然是「一张新增目标的卡」，只是卡上有了真实日期，
+   * 划掉它就是划掉整条线，不会留下半截。
+   *
+   * 断网时这条路根本走不到（`/talk` 没有本机兜底），所以这里不需要降级分支。
+   */
+  const placed = placeNewTasks(plan, proposals, today);
+
   return {
     understanding: output.understanding,
     questions,
-    proposals,
+    proposals: placed,
     refusals,
     close: output.close,
     dropped,
@@ -234,11 +296,20 @@ export function buildTalkMessages(input: TalkInput): { system: string; user: str
 - {"kind":"addTask","task":{"title":"...","type":"read|practice|project|review|assess","estimateMin":45,"notes":"","scheduledFor":null,"tags":[]},"reason":"为什么"}
 - {"kind":"dropTask","taskId":"<id>","reason":"为什么"}
 - {"kind":"profile","patch":{"weeklyHours":3,"weekdays":["mon","wed"],"weakSpots":["动态规划"]},"reason":"为什么"}
+- {"kind":"milestone","milestoneId":"<计划里已有的目标 id>","patch":{"due":"YYYY-MM-DD","title":"...","status":"pending|active|done|dropped"},"reason":"为什么"}
+- {"kind":"addMilestone","milestone":{"title":"目标名字","due":"YYYY-MM-DD 或 null","criteria":["怎么算达成"],"competences":["要练的能力点名字"]},"tasks":[{"title":"...","type":"practice","estimateMin":60,"notes":"","scheduledFor":null,"tags":[]}],"reason":"为什么"}
 每条提案都要有 "engineReason"，值是同一句理由的原文（你不改写它时就和 reason 一样）。
+
+关于「目标」：一个目标就是一条带自己截止日的线（赛事、考试、一门课）。
+- 学生说「我还想加上 X」「我要同时准备 Y」时，用 **addMilestone**，把这条线的任务一起给它。
+- **新目标的任务一律把 scheduledFor 留成 null。** 不要自己算日期——程序会把它们排进学生的空闲时段，
+  排在哪天由引擎决定（它才知道每周有几个时段、哪些日子不可用）。
+- 学生说「X 来不及了 / 把 X 往后推」时，用 **milestone** 改那**一条线**的 due，
+  不要用 goal 去动总截止日——总截止日和某条线的截止日不是一回事。
 
 铁律：
 1. **只提议，不要改计划。** 改动要学生逐条确认之后由程序应用。
-2. **taskId 必须来自上面计划里已有的 id。** 不许自己编 id——编出来的会被丢掉。
+2. **taskId / milestoneId 必须来自上面计划里已有的 id。** 不许自己编 id——编出来的会被丢掉。
 3. **日期用 YYYY-MM-DD 绝对值。** 它会被程序校验（不能是过去、不能落在学生的不可用区间、
    不能早于学生设过的「最早可安排日」）。日期的算术（「周末」是哪两天）由程序做，你不用管。
 4. **没把握就问，不要猜着改。** 如果给了 questions，proposals 必须是空数组——
@@ -259,6 +330,20 @@ export function buildTalkMessages(input: TalkInput): { system: string; user: str
     : '\n学生档案：（还没有）';
 
   /**
+   * 把目标清单单独列出来。
+   *
+   * 计划全文里当然有 `milestones`，但那是 YAML——模型要在里面翻出「哪条线是哪条」
+   * 才能正确回答「X 来不及了」。多目标场景下这一步是模型最容易出错的地方
+   * （改了总截止日而不是那条线），所以这里用**人话**再喂一遍，
+   * 顺便把 id 和截止日并排摆好，它照抄就行。
+   */
+  const goals = input.milestones?.length
+    ? `\n他现在的目标（这些就是「几条线」，每条有自己的截止日）：\n${input.milestones
+        .map((m) => `- ${m.id}｜${m.title}${m.due ? `｜截止 ${m.due}` : '｜没有截止日'}`)
+        .join('\n')}`
+    : '\n他现在还没有任何目标（里程碑）。';
+
+  /**
    * 把「还剩几轮可以问」直接告诉模型。
    *
    * 代码那边有兜底（问满上限就砍掉问题），但让模型**知道**上限在哪，
@@ -271,7 +356,7 @@ export function buildTalkMessages(input: TalkInput): { system: string; user: str
       ? `你还可以澄清 ${left} 轮。`
       : '**你已经问过两轮了，这一轮不能再问，必须给出 proposals 或把做不到的写进 refusals。**';
 
-  const user = `今天是 ${input.today}。${profile}
+  const user = `今天是 ${input.today}。${profile}${goals}
 
 下面是他的计划全文：
 ---

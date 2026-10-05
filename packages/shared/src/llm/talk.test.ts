@@ -24,15 +24,30 @@ import {
 const T0 = '2026-10-05T09:00:00+08:00';
 const TODAY = '2026-10-05';
 
-function planWith(): PlanFile {
+/**
+ * 计划里有一条 `t_a`（「通读 DP」），`extraIds` 里的每一项再加一条同形状的任务。
+ *
+ * 上限与去重的用例需要**多项不同的任务**：同一项任务的两条同类提案是重复的，
+ * 会被去重掉（另有一条用例专门盯这件事），拿它测上限就测不到了。
+ */
+function planWith(extraIds: readonly string[] = []): PlanFile {
   let p = emptyPlan('plan_talk', T0, '测试计划');
-  const r = applyCommand(p, {
-    type: 'task.add',
-    at: T0,
-    task: { id: 't_a', title: '通读 DP', estimateMin: 45, type: 'read', scheduledFor: '2026-10-07' },
-  });
-  if (!r.ok) throw new Error(r.error);
-  p = r.plan;
+  const ids = ['t_a', ...extraIds];
+  for (const id of ids) {
+    const r = applyCommand(p, {
+      type: 'task.add',
+      at: T0,
+      task: {
+        id,
+        title: id === 't_a' ? '通读 DP' : `任务 ${id}`,
+        estimateMin: 45,
+        type: 'read',
+        scheduledFor: '2026-10-07',
+      },
+    });
+    if (!r.ok) throw new Error(r.error);
+    p = r.plan;
+  }
   const r2 = applyCommand(p, {
     type: 'constraints.update',
     at: T0,
@@ -121,29 +136,47 @@ describe('把模型给的东西过一遍', () => {
     assert.match(r.refusals.join(''), /期中考试周/);
   });
 
-  it('一条坏的不会拖垮整批：五条里坏一条，另外四条照给', () => {
-    const good = (id: string, day: string) => ({
+  it('一条坏的不会拖垮整批：四条里坏一条，另外三条照给', () => {
+    const many = planWith(['t_b', 't_c']);
+    const good = (taskId: string, day: string) => ({
       kind: 'reschedule' as const,
-      taskId: 't_a',
+      taskId,
       scheduledFor: day,
-      reason: id,
-      engineReason: id,
+      reason: taskId,
+      engineReason: taskId,
     });
     const r = resolveTalkOutput(
       out({
         understanding: '挪一挪。',
         proposals: [
-          good('a', '2026-10-08'),
-          good('b', '2026-10-09'),
+          good('t_a', '2026-10-08'),
+          good('t_b', '2026-10-09'),
           { kind: 'estimate', taskId: 't_没有', estimateMin: 60, reason: 'r', engineReason: 'r' },
-          good('c', '2026-10-11'),
+          good('t_c', '2026-10-11'),
+        ],
+      }),
+      many,
+      TODAY
+    );
+    assert.equal(r.proposals.length, 3);
+    assert.equal(r.dropped, 1);
+  });
+
+  it('同一项任务的两条同类提案只留一条（应用两条等于只剩后一条）', () => {
+    const r = resolveTalkOutput(
+      out({
+        understanding: '挪两次。',
+        proposals: [
+          { kind: 'reschedule', taskId: 't_a', scheduledFor: '2026-10-08', reason: 'a', engineReason: 'a' },
+          { kind: 'reschedule', taskId: 't_a', scheduledFor: '2026-10-09', reason: 'b', engineReason: 'b' },
         ],
       }),
       plan,
       TODAY
     );
-    // 同一个任务的多条改期会被 proposalKey 去重的是界面层；这里先确认坏的那条没拖垮别的
-    assert.ok(r.proposals.length >= 3);
+    // 两条都留着的话，卡片上会出现「同一个任务改到两天」这种自相矛盾的一屏，
+    // 而应用之后只有后一条生效——两张卡说了两个不同的结果
+    assert.equal(r.proposals.length, 1);
     assert.equal(r.dropped, 1);
   });
 
@@ -158,6 +191,32 @@ describe('把模型给的东西过一遍', () => {
     );
     assert.equal(r.proposals.length, 0);
     assert.equal(r.dropped, 2);
+  });
+
+  /**
+   * 回归：真机实测撞出来的。
+   *
+   * 一条 `addMilestone` schema 不过（模型把话题名当标记塞进了 `tags`），
+   * 而当时这一层只 `dropped++` 就走了——界面上「一条提案都没有」，
+   * `refusals` 里也一句解释都没有。最后只能靠把原始 JSON 打出来才知道
+   * 是哪个字段坏的（`.dev/probe-talk-raw.mjs` 就是为此写的）。
+   *
+   * 所以：**schema 不过也要说话，并且带上字段路径**。
+   */
+  it('schema 不过的提案会留下一条带字段路径的说明，而不是静默消失', () => {
+    const r = resolveTalkOutput(
+      out({
+        understanding: 'x',
+        proposals: [{ kind: 'estimate', taskId: 't_a', estimateMin: '很多' }],
+      }),
+      plan,
+      TODAY
+    );
+    assert.equal(r.proposals.length, 0);
+    assert.equal(r.dropped, 1);
+    assert.equal(r.refusals.length, 1, '不能什么都不说');
+    assert.match(r.refusals[0] ?? '', /我没看懂这一条/);
+    assert.match(r.refusals[0] ?? '', /estimateMin/, '要带上字段路径，否则排查只能靠猜');
   });
 });
 
@@ -197,17 +256,19 @@ describe('硬规则：有澄清问题就绝不同时给提案', () => {
     assert.equal(r.questions.length, MAX_TALK_QUESTIONS);
   });
 
-  it('提案最多六条', () => {
-    const many = Array.from({ length: 10 }, (_, i) => ({
+  it('提案条数有上限，超出的丢掉并计数', () => {
+    // 每条对**不同的**任务——同一项任务的多条同类提案会被去重掉，测不到上限
+    const many = planWith(Array.from({ length: 9 }, (_, i) => `t_x${i}`));
+    const proposals = Array.from({ length: 10 }, (_, i) => ({
       kind: 'estimate' as const,
-      taskId: 't_a',
+      taskId: i === 0 ? 't_a' : `t_x${i - 1}`,
       estimateMin: 15 * (i + 1),
       reason: `r${i}`,
       engineReason: `r${i}`,
     }));
-    const r = resolveTalkOutput(out({ understanding: 'x', proposals: many }), plan, TODAY);
+    const r = resolveTalkOutput(out({ understanding: 'x', proposals }), many, TODAY);
     assert.equal(r.proposals.length, MAX_TALK_PROPOSALS);
-    assert.ok(r.dropped >= 4);
+    assert.equal(r.dropped, 10 - MAX_TALK_PROPOSALS);
   });
 
   it('模型明说做不到的事原样带出来', () => {

@@ -64,10 +64,10 @@ import { AppState } from 'react-native';
 import {
   DEFAULT_SETTINGS,
   addDays,
+  allocateIds,
   answerTurn,
   applyCommand,
   daysBetween,
-  newTaskId,
   parsePlan,
   parseSettings,
   proposalKey,
@@ -1084,14 +1084,13 @@ export function PlanProvider({ children }: { children: ReactNode }) {
     const chosen = cur.proposals.filter((p) => !cur.dropped.includes(proposalKey(p)));
     if (!chosen.length) return;
 
-    // 新任务的 id 由代码生成（模型/规则都不碰 id）
-    let seq: string[] = plan.tasks.map((t) => t.id);
-    const applied = chosen.map((p) => {
-      if (p.kind !== 'addTask') return toAppliedAdjustment(p);
-      const id = newTaskId(seq);
-      seq = [...seq, id];
-      return toAppliedAdjustment(p, id);
-    });
+    // 新增对象的 id 由代码生成（模型/规则都不碰 id）。
+    // **必须用共享层的 `allocateIds`**：`placeNewTasks()` 在更早的时候
+    // 用同一个纯函数算过一遍 id，才把引擎排好的日期写回卡片；
+    // 这里再自己算一遍的话，两边的 id 一旦不同，「排好日期的那个任务」
+    // 和「最后写进计划的任务」就是两个东西。
+    const ids = allocateIds(plan, chosen);
+    const applied = chosen.map((p) => toAppliedAdjustment(p, ids.get(proposalKey(p))));
 
     // 记下**应用之前**的那份，供撤销用。必须在 apply 之前取
     const before = plan;

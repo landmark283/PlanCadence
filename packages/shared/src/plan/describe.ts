@@ -8,11 +8,12 @@
 import type { AppliedAdjustment } from './commands.ts';
 import type { Drift, GoalOption } from './engine.ts';
 import type { PlanFile } from './schema.ts';
+import type { MilestoneEditPatch } from './schema.ts';
 import { fmtDayWithWeekday, fmtMinutes, fmtMonthDay } from './calendar.ts';
 import { proposalKey } from './proposal.ts';
 import type { GoalPatch, ProfilePatch, Proposal } from './proposal.ts';
 
-/** 从调整里取出它引用的任务 id（goal / profile / addResource 不引用具体任务） */
+/** 从调整里取出它引用的任务 id（goal / profile / addResource / 目标 不引用具体任务） */
 export function adjustmentTaskId(a: AppliedAdjustment): string | null {
   switch (a.kind) {
     case 'reschedule':
@@ -25,11 +26,23 @@ export function adjustmentTaskId(a: AppliedAdjustment): string | null {
     case 'goal':
     case 'profile':
     case 'addResource':
+    case 'milestone':
+    case 'addMilestone':
       return null;
   }
 }
 
-export function describeDrift(d: Drift, titleOf: (taskId: string) => string): string {
+/**
+ * 里程碑的名字。
+ *
+ * 以前 `describeDrift` 直接打印 `d.milestoneId`（「里程碑 m_base 还差 3 小时」）——
+ * 那是给学生看的一行字，而 `m_base` 是程序内部的名字。多目标之后更糟：
+ * 学生看到「2 个里程碑有风险」却不知道是**哪两条线**。
+ */
+export type MilestoneNamer = (milestoneId: string) => string;
+
+export function describeDrift(d: Drift, titleOf: (taskId: string) => string, milestoneName?: MilestoneNamer): string {
+  const ms = milestoneName ?? ((id: string) => id);
   switch (d.kind) {
     case 'overdue':
       return `落后   「${titleOf(d.taskId)}」已过期 ${d.days} 天`;
@@ -42,13 +55,17 @@ export function describeDrift(d: Drift, titleOf: (taskId: string) => string): st
     case 'chainBlocked':
       return `连锁   「${titleOf(d.taskId)}」被未完成的「${titleOf(d.blockedBy)}」挡住`;
     case 'milestoneRisk':
-      return `里程碑 ${d.milestoneId} 还差 ${Math.round(d.shortfallMin / 60)} 小时，可用只有 ${Math.round(d.capacityMin / 60)} 小时`;
+      return `目标   「${ms(d.milestoneId)}」还差 ${Math.round(d.shortfallMin / 60)} 小时，可用只有 ${Math.round(d.capacityMin / 60)} 小时`;
     case 'budgetOver':
       return `超载   ${d.week} 排了 ${d.plannedMin} 分钟，预算 ${d.capacityMin} 分钟`;
   }
 }
 
-export function describeAdjustment(a: AppliedAdjustment, titleOf: (taskId: string) => string): string {
+export function describeAdjustment(
+  a: AppliedAdjustment,
+  titleOf: (taskId: string) => string,
+  milestoneName: MilestoneNamer = (id) => id
+): string {
   switch (a.kind) {
     case 'reschedule':
       return `「${titleOf(a.taskId)}」${a.scheduledFor ? `→ ${a.scheduledFor}` : '→ 待排池'}    ${a.reason}`;
@@ -61,11 +78,17 @@ export function describeAdjustment(a: AppliedAdjustment, titleOf: (taskId: strin
     case 'addTask':
       return `新增「${a.task.title}」    ${a.reason}`;
     case 'goal':
-      return `目标变更：${JSON.stringify(a.patch)}    ${a.reason}`;
+      return `总目标变更：${goalPatchText(a.patch)}    ${a.reason}`;
     case 'addResource':
       return `新增资源「${a.resource.title}」    ${a.reason}`;
     case 'profile':
       return `更新档案    ${a.reason}`;
+    case 'milestone':
+      return `目标「${milestoneName(a.milestoneId)}」${milestonePatchText(a.patch)}    ${a.reason}`;
+    case 'addMilestone': {
+      const n = a.tasks.length;
+      return `新增目标「${a.milestone.title}」${n ? `并排进 ${n} 项任务` : '（还没有任务）'}    ${a.reason}`;
+    }
   }
 }
 
@@ -149,6 +172,21 @@ function profilePatchText(patch: ProfilePatch): string {
   return parts.join('，') || '（没有变化）';
 }
 
+/** 目标（里程碑）补丁 → 人话。和 `goalPatchText` 一样，不要出现 JSON */
+function milestonePatchText(patch: MilestoneEditPatch): string {
+  const parts: string[] = [];
+  if (patch.due !== undefined) {
+    parts.push(patch.due ? `截止日 → ${fmtMonthDay(patch.due)}` : '截止日 → 不限');
+  }
+  if (patch.title !== undefined) parts.push(`改名「${patch.title}」`);
+  if (patch.criteria !== undefined) parts.push(`判据改成 ${patch.criteria.length} 条`);
+  if (patch.status !== undefined) {
+    const zh = { pending: '还没开始', active: '进行中', done: '已完成', dropped: '不做了' } as const;
+    parts.push(`状态 → ${zh[patch.status]}`);
+  }
+  return parts.join('，') || '（没有变化）';
+}
+
 /**
  * 把一条提案摊成卡片要的三层。
  *
@@ -157,6 +195,7 @@ function profilePatchText(patch: ProfilePatch): string {
  */
 export function describeProposal(p: Proposal, plan: PlanFile): ProposalRow {
   const titleOf = (id: string) => plan.tasks.find((t) => t.id === id)?.title ?? '（已删除的一项）';
+  const milestoneName = (id: string) => plan.milestones.find((m) => m.id === id)?.title ?? '（已删除的目标）';
   const base = { key: proposalKey(p), reason: p.reason, engineReason: p.engineReason };
 
   switch (p.kind) {
@@ -206,10 +245,42 @@ export function describeProposal(p: Proposal, plan: PlanFile): ProposalRow {
         change: `新加一张 · ${dayLabel(p.task.scheduledFor)} · ${fmtMinutes(p.task.estimateMin)}`,
       };
     case 'goal':
-      return { ...base, title: '目标', change: goalPatchText(p.patch) };
+      return { ...base, title: '总目标', change: goalPatchText(p.patch) };
     case 'profile':
       return { ...base, title: '记住你的情况', change: profilePatchText(p.patch) };
     case 'addResource':
       return { ...base, title: '资料', change: `挂上「${p.resource.title}」` };
+    case 'milestone':
+      return { ...base, title: `目标「${milestoneName(p.milestoneId)}」`, change: milestonePatchText(p.patch) };
+    case 'addMilestone': {
+      /**
+       * 新增目标这张卡要能一眼看出「它还要占掉多少时间、排在哪一段」。
+       *
+       * 一条新备赛线不是免费的：它和已有的线抢同一份每周时长。
+       * 所以第三层显示**合计时长 + 排期区间**，而不是「新加 4 张卡」这种数量。
+       * 日期是引擎排的（`placeNewTasks` 跑过 `proposeReschedule`），
+       * 所以这一行同时也是「它真的排进去了」的证据。
+       */
+      const totalMin = p.tasks.reduce((s, t) => s + t.estimateMin, 0);
+      const due = p.milestone.due ? `截止 ${fmtMonthDay(p.milestone.due)}` : '没有截止日';
+      const load = p.tasks.length ? `${p.tasks.length} 项 · 合计 ${fmtMinutes(totalMin)}` : '还没有具体任务';
+
+      const days = p.tasks.map((t) => t.scheduledFor).filter((d): d is string => Boolean(d)).sort();
+      const first = days[0];
+      const last = days[days.length - 1];
+      const span = !first
+        ? p.tasks.length
+          ? '· 排不进现在的时段'
+          : ''
+        : first === last
+          ? `· 排在 ${fmtMonthDay(first)}`
+          : `· 排进 ${fmtMonthDay(first)}–${fmtMonthDay(last!)}`;
+
+      return {
+        ...base,
+        title: `新目标「${p.milestone.title}」`,
+        change: `${due} · ${load} ${span}`.replace(/\s+/g, ' ').trim(),
+      };
+    }
   }
 }

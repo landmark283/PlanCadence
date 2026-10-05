@@ -51,7 +51,22 @@ export function registerTalkRoutes(app: FastifyInstance, provider: LlmProvider |
     }
 
     const today = body.data.today || clock.today();
-    const res = await completeJson(provider, TalkOutput, buildTalkMessages(body.data), { retries: 1 });
+    /**
+     * 目标清单由**服务端**从计划原文里填。
+     *
+     * 客户端不用发它——服务端为了校验本来就要 `parsePlan` 一遍，
+     * 而多目标之后「哪条线是哪条」是模型最容易搞错的地方（去改总截止日而不是
+     * 那条线的截止日）。少一个客户端字段，就少一处两边对不上的可能。
+     */
+    const res = await completeJson(
+      provider,
+      TalkOutput,
+      buildTalkMessages({
+        ...body.data,
+        milestones: r.plan.milestones.map((m) => ({ id: m.id, title: m.title, due: m.due })),
+      }),
+      { retries: 1 }
+    );
     if (!res.ok) {
       // 模型挂了照实说。这一条没有本机兜底——假装在工作比报错更糟
       req.log.warn({ err: res.error }, 'talk llm failed');

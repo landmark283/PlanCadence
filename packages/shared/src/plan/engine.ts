@@ -23,6 +23,13 @@ export const STALL_DAYS = 5;
 export const OVERRUN_RATIO = 1.3;
 /** 低于这个倍数算预估偏高（「学得快」信号） */
 export const UNDERRUN_RATIO = 0.6;
+/**
+ * 没有任何目标带截止日时，往前看多少天。
+ *
+ * 84 = 12 周。这是个**兜底**，不是排期的视野：只要计划里有带截止日的目标
+ * （多目标场景下几乎总是有），视野就由 `rescheduleHorizon()` 按最远的那个算。
+ */
+export const DEFAULT_HORIZON_DAYS = 84;
 
 /* ------------------------------------------------------------------ *
  * 日期工具（全部按 UTC 处理，避免本地时区把日期算偏一天）
@@ -176,7 +183,7 @@ export type RescheduleOptions = {
  * 可动任务只能在剩余容量里安排。
  */
 export function proposeReschedule(plan: PlanFile, today: string, opts: RescheduleOptions = {}): AppliedAdjustment[] {
-  const horizonDays = opts.horizonDays ?? 84;
+  const horizonDays = opts.horizonDays ?? DEFAULT_HORIZON_DAYS;
   const maxRatio = opts.maxAdjustmentRatio ?? MAX_ADJUSTMENT_RATIO;
 
   const active = plan.tasks.filter((t) => t.status === 'todo' || t.status === 'doing' || t.status === 'blocked');
@@ -462,8 +469,32 @@ export function reviewPlan(plan: PlanFile, today: string): ReviewReport {
   return {
     today,
     drift,
-    adjustments: proposeReschedule(plan, today),
+    adjustments: proposeReschedule(plan, today, { horizonDays: rescheduleHorizon(plan, today) }),
     goalOptions: proposeGoalOptions(plan, drift),
     masteryUpdates: proposeMasteryUpdates(plan),
   };
+}
+
+/**
+ * 排期看多远。
+ *
+ * 默认的 84 天是个**会骗人的数**：多目标场景下最远那条线的截止日可能在半年之外，
+ * 于是引擎只在 84 天里找位置，找不到就把任务丢回待排池并说
+ * 「未来 84 天内可用时段不足，排不下」——可 84 天之外明明还有大把时间。
+ *
+ * 所以看多远由**数据**决定：最远的那个目标截止日，再留 14 天余量
+ * （截止日当天之后还要收尾）。没有任何目标带截止日时才退回到默认值。
+ *
+ * 上下都有界：下限 14 天（否则短截止日会让引擎几乎不排），
+ * 上限 730 天（两年的排期表没有意义，而且那个循环是逐日展开的）。
+ */
+export function rescheduleHorizon(plan: PlanFile, today: string): number {
+  let furthest = 0;
+  for (const m of plan.milestones) {
+    if (!m.due || m.status === 'done' || m.status === 'dropped') continue;
+    furthest = Math.max(furthest, daysBetween(today, m.due));
+  }
+  if (plan.goal.deadline) furthest = Math.max(furthest, daysBetween(today, plan.goal.deadline));
+  if (furthest <= 0) return DEFAULT_HORIZON_DAYS;
+  return Math.max(14, Math.min(730, furthest + 14));
 }

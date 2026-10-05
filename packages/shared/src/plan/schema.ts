@@ -146,6 +146,17 @@ export const Milestone = z.object({
   criteria: z.array(z.string().max(200)).default([]),
 });
 export type Milestone = z.infer<typeof Milestone>;
+export type MilestoneInput = z.input<typeof Milestone>;
+export type CompetenceInput = z.input<typeof Competence>;
+
+/**
+ * 一个目标（= 里程碑）**允许被改**的字段。显式白名单。
+ *
+ * 不含 `competenceIds`：改挂哪些能力点等于重新定义这个目标练什么，
+ * 那应该是「新建一个目标」而不是「改一个」——真放开的话，一个手滑就能让
+ * 某条线练的东西整个换掉，而学生在卡片上只看到一行「能力点改了」。
+ */
+export type MilestoneEditPatch = Partial<Pick<Milestone, 'title' | 'due' | 'criteria' | 'status'>>;
 
 export const Task = z.object({
   id: Id,
@@ -456,6 +467,30 @@ export function validatePlan(plan: PlanFile): PlanIssue[] {
           path: `task:${t.id}`,
           message: `排期 ${t.scheduledFor} 晚于目标截止日 ${plan.goal.deadline}`,
         });
+    }
+  }
+
+  /**
+   * 9) 任务排在**它自己那条线**的截止日之后。
+   *
+   * 和上一条是同一个道理，但目标可以是多条（一个里程碑 = 一条有自己截止日的线：
+   * 「蓝桥杯省赛」和「ACM 校赛」的日期不一样）。只查总目标的截止日会漏掉真正的
+   * 矛盾：总目标在明年四月，而某个赛事的截止日在十一月底——任务排到十二月，
+   * 上一条什么都不报，学生却已经赶不上那个赛事了。
+   *
+   * 只说 **warn** 不说 error：排期是建议不是承诺，一条落在截止日之后的排期
+   * 该被看见，但不该让整份文件读不出来。
+   */
+  const msById = new Map(plan.milestones.map((m) => [m.id, m]));
+  for (const t of plan.tasks) {
+    if (!t.scheduledFor || !t.milestoneId) continue;
+    const m = msById.get(t.milestoneId);
+    if (m?.due && t.scheduledFor > m.due) {
+      issues.push({
+        level: 'warn',
+        path: `task:${t.id}`,
+        message: `排期 ${t.scheduledFor} 晚于「${m.title}」的截止日 ${m.due}`,
+      });
     }
   }
 

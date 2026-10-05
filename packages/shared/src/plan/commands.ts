@@ -8,8 +8,17 @@
  *
  * 回滚不靠重放命令，靠 versions/ 目录里的整份快照。命令历史只用于展示和调试。
  */
-import { Task, Resource, validatePlan, clonePlan, SCHEMA_ID } from './schema.ts';
-import type { PlanFile, TaskStatus, TaskInput, ResourceInput, HistoryEntry } from './schema.ts';
+import { Task, Resource, Milestone, Competence, validatePlan, clonePlan, SCHEMA_ID } from './schema.ts';
+import type {
+  PlanFile,
+  TaskStatus,
+  TaskInput,
+  ResourceInput,
+  MilestoneInput,
+  CompetenceInput,
+  MilestoneEditPatch,
+  HistoryEntry,
+} from './schema.ts';
 import type { TaskEditPatch } from './task-patch.ts';
 
 /* ------------------------------------------------------------------ *
@@ -145,7 +154,30 @@ export type AppliedAdjustment =
    * `proposal.ts` 的 `ProfilePatch`**（模型输出进来的那一刻），
    * 所以到这一层时它已经是合法的。命令层不必为此反向依赖 `llm` 层。
    */
-  | { kind: 'profile'; patch: Record<string, unknown>; reason: string };
+  | { kind: 'profile'; patch: Record<string, unknown>; reason: string }
+  /**
+   * 改一个**目标**（里程碑）：挪它自己的截止日、改判据、改名、收尾。
+   *
+   * 和 `goal` 分开是必须的：`goal` 改的是那句总目标 + 总截止日，
+   * 而多目标场景下真正要动的是**某一条线**的截止日。合成一种的话，
+   * 「把蓝桥杯那条线挪到十二月中」就没法表达。
+   */
+  | { kind: 'milestone'; milestoneId: string; patch: MilestoneEditPatch; reason: string }
+  /**
+   * 新增一个目标，连同它的能力点和任务，**一次建完**。
+   *
+   * 必须是一条命令而不是三条：`addMilestone` → `addCompetence` → `addTask`
+   * 中间任何一步被拒，都会留下一个「有目标但没任务」或「有任务但目标不存在」的计划。
+   * 而 `validatePlan` 对悬空 `milestoneId` 是 error——那会让下一次启动读不出文件。
+   * 一条命令保证要么全成要么全不成。
+   */
+  | {
+      kind: 'addMilestone';
+      milestone: MilestoneInput;
+      competences: CompetenceInput[];
+      tasks: TaskInput[];
+      reason: string;
+    };
 
 /* ------------------------------------------------------------------ *
  * 结果类型
@@ -431,10 +463,73 @@ function execute(next: PlanFile, cmd: Command): string | { error: string } {
             next.profile = { ...cur, ...a.patch };
             break;
           }
+          case 'milestone': {
+            const i = next.milestones.findIndex((x) => x.id === a.milestoneId);
+            if (i < 0) return { error: `未找到目标 ${a.milestoneId}` };
+            const merged = { ...next.milestones[i]!, ...a.patch };
+            const parsed = Milestone.safeParse(merged);
+            if (!parsed.success) return { error: `目标数据非法：${parsed.error.issues[0]?.message ?? '未知'}` };
+            next.milestones = next.milestones.map((x, k) => (k === i ? parsed.data : x));
+            break;
+          }
+          case 'addMilestone': {
+            /**
+             * 顺序是**先定目标、再挂能力点、最后挂任务**——因为后两步都要引用
+             * 第一步刚生成的那个 id。整段在一个 case 里跑完，所以外面看到的
+             * 仍然是一次原子变更。
+             */
+            if (next.milestones.some((x) => x.id === a.milestone.id)) {
+              return { error: `目标 id 已存在：${a.milestone.id}` };
+            }
+            const ms = Milestone.safeParse({ ...a.milestone, competenceIds: a.competences.map((c) => c.id) });
+            if (!ms.success) return { error: `目标数据非法：${ms.error.issues[0]?.message ?? '未知'}` };
+
+            const comps: typeof next.competences = [];
+            for (const c of a.competences) {
+              if (next.competences.some((x) => x.id === c.id) || comps.some((x) => x.id === c.id)) {
+                return { error: `能力点 id 已存在：${c.id}` };
+              }
+              const parsed = Competence.safeParse(c);
+              if (!parsed.success) return { error: `能力点数据非法：${parsed.error.issues[0]?.message ?? '未知'}` };
+              comps.push(parsed.data);
+            }
+
+            const added: typeof next.tasks = [];
+            for (const t of a.tasks) {
+              if (next.tasks.some((x) => x.id === t.id) || added.some((x) => x.id === t.id)) {
+                return { error: `任务 id 已存在：${t.id}` };
+              }
+              // 连线在这里强制指向新目标，不看传进来的 milestoneId——
+              // 模型给的值一律以代码算出来的为准
+              const parsed = Task.safeParse({ ...t, milestoneId: a.milestone.id });
+              if (!parsed.success) return { error: `任务数据非法：${parsed.error.issues[0]?.message ?? '未知'}` };
+              added.push(parsed.data);
+            }
+
+            next.milestones = [...next.milestones, ms.data];
+            next.competences = [...next.competences, ...comps];
+            next.tasks = [...next.tasks, ...added];
+            break;
+          }
         }
       }
       if (cmd.review) next.reviews = [...next.reviews, { ...cmd.review, adjustments: cmd.applied.map((a) => a.reason) }];
-      return `应用了 ${cmd.applied.length} 项调整`;
+
+      /**
+       * 摘要要说人话。
+       *
+       * 「应用了 4 项调整」在通知条上等于没说——学生看不到自己刚做的
+       * 「加了一条新的备赛线」这件事发生了什么。新增目标/改目标截止日这两类
+       * 是**结构性**变更（不是挪一个日期），所以单独点名，其余合成一句。
+       */
+      const bits: string[] = [];
+      const addedMilestones = cmd.applied.filter((a) => a.kind === 'addMilestone');
+      for (const a of addedMilestones) bits.push(`新增目标「${a.milestone.title}」`);
+      const movedMilestones = cmd.applied.filter((a) => a.kind === 'milestone').length;
+      if (movedMilestones) bits.push(`调整了 ${movedMilestones} 个目标`);
+      const others = cmd.applied.length - addedMilestones.length - movedMilestones;
+      if (others) bits.push(bits.length ? `另有 ${others} 项调整` : `应用了 ${others} 项调整`);
+      return bits.join('，') || '没有需要应用的调整';
     }
 
     case 'plan.settle': {

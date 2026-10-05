@@ -29,9 +29,10 @@
  */
 import { z } from 'zod';
 
-import { DateStr, Id, PositiveInt, Priority, Resource, TaskType } from './schema.ts';
+import { DateStr, Id, MilestoneStatus, PositiveInt, Priority, Resource, TaskType } from './schema.ts';
+import { newCompetenceId, newMilestoneId, newTaskId } from './ids.ts';
 import type { AppliedAdjustment } from './commands.ts';
-import type { PlanFile } from './schema.ts';
+import type { MilestoneEditPatch, PlanFile } from './schema.ts';
 import { MAX_ESTIMATE_MIN, MIN_ESTIMATE_MIN } from './task-patch.ts';
 import type { TaskEditPatch } from './task-patch.ts';
 
@@ -83,9 +84,87 @@ export const DraftTask = z.object({
   notes: z.string().max(2000).default(''),
   scheduledFor: DateStr.nullable().default(null),
   notBefore: DateStr.nullable().default(null),
-  tags: z.array(Id).default([]),
+  /**
+   * 新任务**不预设标记**，所以这里对模型给的 tags 一律宽容地丢掉。
+   *
+   * ## 为什么用 `.catch([])` 而不是老老实实校验
+   *
+   * 这一条是**真机实测撞出来的**，代价很大：模型兴冲冲地给一个新增目标
+   * 写了 6 条很不错的任务，每条都带 `tags: ["搜索"]`（它把标记理解成了**话题名**），
+   * 而 `Task.tags` 存的是**标记目录的 id**（`^[a-z][a-z0-9_]{0,31}$`）。
+   * 于是整条 `addMilestone` 提案 schema 不过 → **一个目标连带 6 条任务全没了**，
+   * 而且当时那一层只计数、不报原因，界面上什么都不显示。
+   *
+   * 一个装饰性的标记不该有这种杀伤半径。`.catch` 把损失限制在它自己身上：
+   * 标签丢掉，目标和任务照常进来。
+   *
+   * ## 为什么干脆不保留合法的那些
+   *
+   * 本地生成路径早就有定论（见 `llm/planner.ts`）：**标记由学生自己打，
+   * 生成时不预设**——系统猜不出「这题我错了好几次」这种事，而猜错一次标记
+   * 比不打标记更烦人（学生得先删掉再打自己的）。模型能给出的「标记」
+   * 十有八九是话题名，留着只会污染标记目录。
+   */
+  tags: z.array(Id).max(6).catch([]).default([]),
 });
 export type DraftTask = z.infer<typeof DraftTask>;
+
+/* ------------------------------------------------------------------ *
+ * 目标（= 里程碑）
+ * ------------------------------------------------------------------ */
+
+/**
+ * 「目标」在数据里就是**里程碑**，不另开一个数组。
+ *
+ * ## 为什么不给 `PlanFile` 加一个 `goals[]`
+ *
+ * 里程碑已经长着一个目标该有的全部东西：名字（`title`）、截止日（`due`）、
+ * 成功判据（`criteria`）、挂的能力点（`competenceIds`）、状态（`status`）。
+ * 而引擎**从头到尾没有读过 `plan.goal`**——它按 `tasks` / `milestones` /
+ * `competences` / `constraints` 干活，排期时按「所属里程碑的截止日」排序，
+ * 也逐里程碑算「还来不来得及」。也就是说**多目标这件事在引擎里早就是成立的**，
+ * 缺的只是「怎么新增/修改一个目标」这条表达。
+ *
+ * 加一个 `goals[]` 的代价是把同一件事写两遍（里程碑和目标各自带截止日、
+ * 各自挂能力点），而这个项目已经因为「两份真相」吃过两次亏
+ * （见 `docs/技术方案.md` §9.15 ⑧）。语义上也站得住：学生说的「最终目标」
+ * 是一句话，而赛事/考试是**几条并行的线**——那正是里程碑。
+ *
+ * 于是：`PlanFile.goal` 保持「总目标」那**一句话**（学生原话，复盘页要原样回显），
+ * 多个目标住在 `milestones[]` 里，每个有自己的截止日。
+ */
+export const MilestonePatch = z.object({
+  title: z.string().min(1).max(120).optional(),
+  due: DateStr.nullable().optional(),
+  criteria: z.array(z.string().max(200)).optional(),
+  status: MilestoneStatus.optional(),
+});
+export type MilestonePatch = z.infer<typeof MilestonePatch>;
+
+/**
+ * 编译期的相等性检查：这个 schema 推出来的类型必须就是 `MilestoneEditPatch`。
+ *
+ * 和 `TaskPatchSchema` 那一处同样的道理——命令层的白名单和这里各写一遍，
+ * 迟早会只剩一边。有了这一行，加字段时漏掉任何一边都过不了类型检查。
+ */
+const _msPatchMatches: MilestoneEditPatch extends MilestonePatch ? true : never = true;
+void _msPatchMatches;
+
+/**
+ * 模型提议新增的一个目标。**不含 id**（由代码生成）。
+ *
+ * `competences` 只给**名字**，id 与 target 由代码补——和 `DraftTask` 不含 id
+ * 是同一个理由：模型碰 id 就会造出悬空引用。
+ */
+export const DraftMilestone = z.object({
+  title: z.string().min(1).max(120),
+  due: DateStr.nullable().default(null),
+  criteria: z.array(z.string().max(200)).max(8).default([]),
+  /** 这个目标要练的能力点（名字）。空数组合法：先立目标再想练什么 */
+  competences: z.array(z.string().min(1).max(80)).max(8).default([]),
+});
+export type DraftMilestone = z.infer<typeof DraftMilestone>;
+
 
 /* ------------------------------------------------------------------ *
  * 提案
@@ -146,6 +225,23 @@ export const Proposal = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('addResource'), resource: Resource, ...Reason }),
   /** 改学生档案：他说「我每周只有 3 小时了」，要改的不只是计划里的数字 */
   z.object({ kind: z.literal('profile'), patch: ProfilePatch, ...Reason }),
+  /**
+   * 改一个**目标**（里程碑）：挪它自己的截止日、改判据、改名、收尾。
+   *
+   * 存在的理由是一个真实的错：复盘检测到的是「某个里程碑来不及」，
+   * 但当时给出的卡片改的是**总目标的截止日**（`goal.deadline + 14`）。
+   * 总目标在明年四月、而紧的是十一月底的那个赛事时，那张卡什么都没解决，
+   * 却写着「里程碑可能赶不上」——比不给卡更坏。
+   */
+  z.object({ kind: z.literal('milestone'), milestoneId: Id, patch: MilestonePatch, ...Reason }),
+  /**
+   * 新增一个目标，**并带上它的任务**。
+   *
+   * 为什么任务要一起给：一个没有任务的目标排不进任何时间，复盘也无从谈起。
+   * 而如果拆成「先加目标、再加任务」两条提案，任务就得自己带 `milestoneId`——
+   * 那正是模型最容易编错的地方（悬空引用）。放成一条，连线由代码建。
+   */
+  z.object({ kind: z.literal('addMilestone'), milestone: DraftMilestone, tasks: z.array(DraftTask).max(12).default([]), ...Reason }),
 ]);
 export type Proposal = z.infer<typeof Proposal>;
 export type ProposalKind = Proposal['kind'];
@@ -174,6 +270,11 @@ export function proposalKey(p: Proposal): string {
       return 'profile';
     case 'addResource':
       return `addResource:${p.resource.id}`;
+    case 'milestone':
+      return `milestone:${p.milestoneId}`;
+    case 'addMilestone':
+      // 和 addTask 同理：还没有 id，用标题
+      return `addMilestone:${p.milestone.title}`;
   }
 }
 
@@ -190,14 +291,61 @@ export function proposalTaskId(p: Proposal): string | null {
     case 'goal':
     case 'profile':
     case 'addResource':
+    case 'milestone':
+    case 'addMilestone':
       return null;
   }
+}
+
+/**
+ * 给一批提案里的**新增对象**分配 id。纯函数。
+ *
+ * ## 为什么要有它，而不是让每个调用方自己 `newTaskId()`
+ *
+ * 「新增目标」要三种 id：里程碑的、它挂的每个能力点的、它带的每个任务的。
+ * 而 **`placeNewTasks()` 要拿这些 id 去投影一份计划跑引擎**，
+ * 界面在真正写入时又要再用一次——两处必须算出**完全相同**的 id，
+ * 否则引擎排好日期的那个任务和最后写进计划的任务是两个东西。
+ *
+ * 所以分配只有这一个实现：两边都拿同一份 `plan + proposals` 去调它，
+ * 结果由构造保证一致（都是纯函数，都不读时钟和随机数）。
+ * 同一个批次里多条提案的 id 也不会撞——分配出来的 id 会立刻并进
+ * 已用集合，下一条接着往后取。
+ */
+export function allocateIds(plan: PlanFile, proposals: readonly Proposal[]): Map<string, NewIds> {
+  const taskIds = plan.tasks.map((t) => t.id);
+  const msIds = plan.milestones.map((m) => m.id);
+  const compIds = plan.competences.map((c) => c.id);
+  const out = new Map<string, NewIds>();
+
+  for (const p of proposals) {
+    if (p.kind === 'addTask') {
+      const id = newTaskId(taskIds);
+      taskIds.push(id);
+      out.set(proposalKey(p), { task: id });
+      continue;
+    }
+    if (p.kind !== 'addMilestone') continue;
+    const id = newMilestoneId(msIds);
+    msIds.push(id);
+    const competenceIds = p.milestone.competences.map(() => {
+      const cid = newCompetenceId(compIds);
+      compIds.push(cid);
+      return cid;
+    });
+    const ids = p.tasks.map(() => {
+      const tid = newTaskId(taskIds);
+      taskIds.push(tid);
+      return tid;
+    });
+    out.set(proposalKey(p), { milestone: { id, competenceIds, taskIds: ids } });
+  }
+  return out;
 }
 
 /* ------------------------------------------------------------------ *
  * 校验：模型提议，代码把关
  * ------------------------------------------------------------------ */
-
 export type ProposalCheck = { ok: true } | { ok: false; reason: string };
 
 const OK: ProposalCheck = { ok: true };
@@ -277,6 +425,38 @@ export function validateProposal(p: Proposal, plan: PlanFile, today: string): Pr
       if (Object.keys(p.patch).length === 0) return { ok: false, reason: '这条没说要改什么' };
       return OK;
     }
+    case 'milestone': {
+      const m = plan.milestones.find((x) => x.id === p.milestoneId);
+      if (!m) return { ok: false, reason: '计划里没有这个目标了' };
+      if (Object.keys(p.patch).length === 0) return { ok: false, reason: '这条没说要改什么' };
+      if (p.patch.due && p.patch.due < today) {
+        return { ok: false, reason: `「${m.title}」的截止日不能是过去的日期` };
+      }
+      return OK;
+    }
+    case 'addMilestone': {
+      const title = p.milestone.title.trim();
+      if (!title) return { ok: false, reason: '新目标没有名字' };
+      /**
+       * 重名要拦：里程碑在界面上是用**标题**认人的（卡片、事实、方向都说名字），
+       * 两个同名的目标一出现，学生就分不清哪张卡改的是哪一个。
+       */
+      const dup = plan.milestones.find((x) => x.title.trim() === title);
+      if (dup) return { ok: false, reason: `已经有一个叫「${title}」的目标了` };
+      if (p.milestone.due && p.milestone.due < today) {
+        return { ok: false, reason: `新目标「${title}」的截止日不能是过去的日期` };
+      }
+      for (const t of p.tasks) {
+        if (t.estimateMin < MIN_ESTIMATE_MIN || t.estimateMin > MAX_ESTIMATE_MIN) {
+          return { ok: false, reason: `「${t.title}」的时长 ${t.estimateMin} 分钟超出了可设范围` };
+        }
+        if (t.scheduledFor !== null && t.scheduledFor < today) {
+          return { ok: false, reason: `「${t.title}」不能排到已经过去的日子` };
+        }
+      }
+      if (Object.keys(p.milestone).length === 0) return { ok: false, reason: '这条没说要改什么' };
+      return OK;
+    }
     case 'addResource':
       return OK;
   }
@@ -287,12 +467,29 @@ export function validateProposal(p: Proposal, plan: PlanFile, today: string): Pr
  * ------------------------------------------------------------------ */
 
 /**
+ * 新对象的 id。**由调用方算好传进来**（而不是在这里读时钟或随机数），
+ * 这样本函数保持纯函数、可以被单测直接打。
+ *
+ * `addMilestone` 要三种 id：里程碑自己的、它挂的每个能力点的、以及它带的每个任务的
+ * （`taskIds` 与提案里的 `tasks` **按下标一一对应**）。
+ */
+export type NewIds = {
+  /** `addTask` 用 */
+  task?: string;
+  /** `addMilestone` 用 */
+  milestone?: { id: string; competenceIds: string[]; taskIds: string[] };
+};
+
+/** 一个目标练到什么程度算会。和 planner 的本地路径一致（`target: 0.8`） */
+const DEFAULT_COMPETENCE_TARGET = 0.8;
+
+/**
  * 把提案变成 `plan.applyAdjustments` 要的载荷。
  *
- * `newId` 只在 `addTask` 时用到——它是 `newTaskId()` 算出来的，
- * 由调用方传进来（而不是在这里读时钟或随机数），保持本函数是纯函数。
+ * 缺 id 就抛：这不是「学生输错了」，是**调用方的编程错误**——
+ * 悄悄用一个空 id 建出一条 id 为空的里程碑，会让整份计划下一次解析就失败。
  */
-export function toAppliedAdjustment(p: Proposal, newId?: string): AppliedAdjustment {
+export function toAppliedAdjustment(p: Proposal, ids: NewIds = {}): AppliedAdjustment {
   switch (p.kind) {
     case 'reschedule':
       return { kind: 'reschedule', taskId: p.taskId, scheduledFor: p.scheduledFor, reason: p.reason };
@@ -303,11 +500,11 @@ export function toAppliedAdjustment(p: Proposal, newId?: string): AppliedAdjustm
     case 'goal':
       return { kind: 'goal', patch: p.patch, reason: p.reason };
     case 'addTask': {
-      if (!newId) throw new Error('addTask 提案落地时必须给一个 id');
+      if (!ids.task) throw new Error('addTask 提案落地时必须给一个 id');
       return {
         kind: 'addTask',
         task: {
-          id: newId,
+          id: ids.task,
           title: p.task.title,
           type: p.task.type,
           estimateMin: p.task.estimateMin,
@@ -315,6 +512,7 @@ export function toAppliedAdjustment(p: Proposal, newId?: string): AppliedAdjustm
           scheduledFor: p.task.scheduledFor,
           notBefore: p.task.notBefore,
           tags: p.task.tags,
+          milestoneId: null,
         },
         reason: p.reason,
       };
@@ -325,5 +523,52 @@ export function toAppliedAdjustment(p: Proposal, newId?: string): AppliedAdjustm
       return { kind: 'addResource', resource: p.resource, reason: p.reason };
     case 'profile':
       return { kind: 'profile', patch: p.patch as Record<string, unknown>, reason: p.reason };
+    case 'milestone':
+      return { kind: 'milestone', milestoneId: p.milestoneId, patch: p.patch, reason: p.reason };
+    case 'addMilestone': {
+      const alloc = ids.milestone;
+      if (!alloc) throw new Error('addMilestone 提案落地时必须给里程碑 id');
+      if (alloc.taskIds.length !== p.tasks.length) {
+        throw new Error(`addMilestone 需要 ${p.tasks.length} 个任务 id，收到 ${alloc.taskIds.length} 个`);
+      }
+      if (alloc.competenceIds.length !== p.milestone.competences.length) {
+        throw new Error(
+          `addMilestone 需要 ${p.milestone.competences.length} 个能力点 id，收到 ${alloc.competenceIds.length} 个`
+        );
+      }
+      return {
+        kind: 'addMilestone',
+        milestone: {
+          id: alloc.id,
+          title: p.milestone.title,
+          due: p.milestone.due,
+          criteria: p.milestone.criteria,
+          status: 'active',
+          competenceIds: [...alloc.competenceIds],
+        },
+        competences: p.milestone.competences.map((name, i) => ({
+          id: alloc.competenceIds[i]!,
+          name,
+          target: DEFAULT_COMPETENCE_TARGET,
+          // 新目标的能力点从 0 开始：系统对孩子现在会多少一无所知，
+          // 给个「中等」是在编事实。证据链为空时界面会显示「还没有证据」。
+          current: 0,
+          evidence: [],
+        })),
+        tasks: p.tasks.map((t, i) => ({
+          id: alloc.taskIds[i]!,
+          title: t.title,
+          type: t.type,
+          estimateMin: t.estimateMin,
+          notes: t.notes,
+          scheduledFor: t.scheduledFor,
+          notBefore: t.notBefore,
+          tags: t.tags,
+          // 连线在这里建，模型碰不到
+          milestoneId: alloc.id,
+        })),
+        reason: p.reason,
+      };
+    }
   }
 }

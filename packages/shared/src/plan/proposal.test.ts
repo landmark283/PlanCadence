@@ -209,7 +209,7 @@ describe('落地：提案 → 命令载荷', () => {
       engineReason: 'r',
     };
     assert.throws(() => toAppliedAdjustment(p), /必须给一个 id/);
-    const a = toAppliedAdjustment(p, 't_09');
+    const a = toAppliedAdjustment(p, { task: 't_09' });
     assert.equal(a.kind === 'addTask' ? a.task.id : '', 't_09');
   });
 
@@ -305,9 +305,9 @@ describe('卡片上的三层：改的是谁 / 从什么变成什么 / 为什么'
     assert.match(r.change, /45 分钟 → 1 小时 30 分/);
   });
 
-  it('目标：绝不出现 JSON', () => {
+  it('总目标：绝不出现 JSON', () => {
     const r = row({ kind: 'goal', patch: { deadline: '2026-12-01' }, reason: 'r', engineReason: 'r' });
-    assert.equal(r.title, '目标');
+    assert.equal(r.title, '总目标');
     assert.match(r.change, /截止日 → 12月1日/);
     assert.equal(r.change.includes('{'), false, '旧实现把 patch 用 JSON.stringify 打出来了，不能给学生看');
   });

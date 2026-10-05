@@ -30,6 +30,7 @@
  * 而且学生改几个字就能用——这正是「帮你大体把卡片写好」的意思。
  */
 import { addDays } from './engine.ts';
+import { fmtMonthDay } from './calendar.ts';
 import { ESTIMATE_STEP } from './task-patch.ts';
 import { validateProposal } from './proposal.ts';
 import type { ReviewReport, Drift } from './engine.ts';
@@ -139,13 +140,26 @@ export function reviewQuestions(plan: PlanFile, report: ReviewReport): QuestionS
    */
   const goalSoon =
     plan.goal.deadline !== null && plan.goal.deadline <= addDays(report.today, 14);
-  if (driftOf(report, 'milestoneRisk').length > 0 || goalSoon) {
+  const riskyNow = driftOf(report, 'milestoneRisk')
+    .map((d) => (d.kind === 'milestoneRisk' ? plan.milestones.find((m) => m.id === d.milestoneId) : undefined))
+    .filter((m): m is NonNullable<typeof m> => Boolean(m));
+  if (riskyNow.length > 0 || goalSoon) {
+    /**
+     * 问句里必须带上**是哪条线**。
+     *
+     * 多目标时「时间可能不够」是一句无法回答的话：学生有三条线，
+     * 他不知道系统说的是哪一条，也就没法在「挪截止日 / 少排一点 / 我自己想办法」
+     * 之间选。带上名字之后，这三个选项才各自对应一个具体决定。
+     */
+    const which = riskyNow.length
+      ? `${riskyNow.map((m) => `「${m.title}」`).join('、')}${riskyNow.length > 1 ? '这些线' : ''}按现在的进度可能赶不上`
+      : '按现在的进度，时间可能不够';
     out.push({
       id: Q_GOAL,
       field: null,
       kind: 'single',
-      prompt: '按现在的进度，时间可能不够。你想怎么处理？',
-      why: '是往后挪截止日，还是把每周投入降下来先把稳的做完。',
+      prompt: `${which}。你想怎么处理？`,
+      why: '是往后挪那条线的截止日，还是把每周投入降下来先把稳的做完。',
       options: [
         { value: 'extend', label: '截止日往后挪一点' },
         { value: 'lower', label: '每周少排一点' },
@@ -322,19 +336,46 @@ export function reviewProposals(
     });
   }
 
-  /* ── 7. 目标：只在代码能算出具体数的时候给 ─────────────── */
-  const canExtend = plan.goal.deadline !== null && goalAnswer !== 'lower';
-  const extendTo = plan.goal.deadline ? addDays(plan.goal.deadline, 14) : null;
-  if (goalAnswer === 'keep') {
+  /* ── 7. 目标：只在代码能算出具体数的时候给 ─────────────── *
+   * 这里修过一个真错：原来的卡在检测到 `milestoneRisk` 时改的是
+   * **总目标的截止日**（`goal.deadline + 14`）。总目标在明年四月、
+   * 而紧的是十一月底那个赛事时，那张卡什么都没解决，却写着「里程碑可能赶不上」——
+   * 比不给卡更坏。现在**紧的是哪条线就改哪条线的截止日**。
+   *
+   * 总目标那张卡只在学生明确说要挪总截止日、而**没有任何带截止日的目标**可挪时给。
+   */
+  const riskyMs = driftOf(report, 'milestoneRisk').filter(
+    (d): d is Extract<Drift, { kind: 'milestoneRisk' }> => d.kind === 'milestoneRisk'
+  );
+  const msById = new Map(plan.milestones.map((m) => [m.id, m]));
+
+  /** 攥着那条线的名字，卡片上才分得清是哪一个目标 */
+  const riskyDated = riskyMs
+    .map((d) => ({ d, m: msById.get(d.milestoneId) }))
+    .filter((x): x is { d: Extract<Drift, { kind: 'milestoneRisk' }>; m: NonNullable<typeof x.m> } =>
+      Boolean(x.m?.due)
+    );
+
+  if (goalAnswer === 'extend') {
+    for (const { d, m } of riskyDated) {
+      const to = addDays(m.due!, 14);
+      const why = `「${m.title}」还差 ${Math.round(d.shortfallMin / 60)} 小时，可用只有 ${Math.round(d.capacityMin / 60)} 小时`;
+      push({
+        kind: 'milestone',
+        milestoneId: m.id,
+        patch: { due: to },
+        reason: `${why}，把它的截止日往后挪两周到 ${to}`,
+        engineReason: why,
+      });
+    }
+    // 一个带截止日的目标都没有时，唯一能挪的就是总目标
+    if (!riskyDated.length && plan.goal.deadline) {
+      const to = addDays(plan.goal.deadline, 14);
+      const why = `按现在的进度，原截止日 ${plan.goal.deadline} 偏紧`;
+      push({ kind: 'goal', patch: { deadline: to }, reason: `${why}，往后挪两周到 ${to}`, engineReason: why });
+    }
+  } else if (goalAnswer === 'keep') {
     // 学生明确说「不改，我自己想办法」——那就不给任何目标卡
-  } else if (goalAnswer === 'extend' && extendTo) {
-    const why = `按现在的进度，原截止日 ${plan.goal.deadline} 偏紧`;
-    push({
-      kind: 'goal',
-      patch: { deadline: extendTo },
-      reason: `${why}，往后挪两周到 ${extendTo}`,
-      engineReason: why,
-    });
   } else if (goalAnswer === 'lower') {
     const hours = plan.constraints.weeklyMinutes / 60;
     const target = Math.max(1, Math.round(hours * 0.7));
@@ -345,15 +386,24 @@ export function reviewProposals(
       reason: `${why}，先按每周 ${target} 小时算`,
       engineReason: why,
     });
-  } else if (canExtend && driftOf(report, 'milestoneRisk').length > 0 && extendTo) {
-    // 没问到（或没答）但里程碑确实来不及：给一张供学生决定
-    const why = '按现在的进度，里程碑可能赶不上';
-    push({
-      kind: 'goal',
-      patch: { deadline: extendTo },
-      reason: `${why}，可以把截止日往后挪两周到 ${extendTo}`,
-      engineReason: why,
-    });
+  } else {
+    /**
+     * 没问到（或没答）但某条线确实来不及：给一张供学生决定。
+     *
+     * 卡上必须带**那条线的名字和它自己的截止日**：多目标时只说
+     * 「某个目标可能赶不上」，学生不知道指的是哪一条，也就没法判断该不该同意。
+     */
+    for (const { d, m } of riskyDated) {
+      const to = addDays(m.due!, 14);
+      const why = `按现在的进度，「${m.title}」（${m.due} 截止）可能赶不上`;
+      push({
+        kind: 'milestone',
+        milestoneId: m.id,
+        patch: { due: to },
+        reason: `${why}，可以把它的截止日往后挪两周到 ${to}`,
+        engineReason: why,
+      });
+    }
   }
 
   void titleOf;
@@ -384,7 +434,7 @@ export function reviewFacts(plan: PlanFile, report: ReviewReport): ReviewFacts {
   if (count('underrun')) chips.push({ key: 'underrun', text: `${count('underrun')} 项比预期快`, tone: 'success' });
   if (count('stalled')) chips.push({ key: 'stalled', text: `${count('stalled')} 项停滞`, tone: 'warning' });
   if (count('chainBlocked')) chips.push({ key: 'chainBlocked', text: `${count('chainBlocked')} 项被前置挡住`, tone: 'warning' });
-  if (count('milestoneRisk')) chips.push({ key: 'milestoneRisk', text: `${count('milestoneRisk')} 个里程碑有风险`, tone: 'warning' });
+  if (count('milestoneRisk')) chips.push({ key: 'milestoneRisk', text: `${count('milestoneRisk')} 个目标有风险`, tone: 'warning' });
   if (count('budgetOver')) chips.push({ key: 'budgetOver', text: `${count('budgetOver')} 周超载`, tone: 'warning' });
 
   if (!chips.length) {
@@ -419,6 +469,21 @@ export function reviewFacts(plan: PlanFile, report: ReviewReport): ReviewFacts {
     const t = byId.get(stalledOne.taskId);
     parts.push(t ? `「${t.title}」进行中已经 ${stalledOne.days} 天没动静` : `有 ${count('stalled')} 项停滞`);
   }
+  /**
+   * 目标有风险时**必须点名**。
+   *
+   * 多目标之后「2 个目标有风险」这句话是不完整的：学生手里可能有三条线，
+   * 他要知道紧的是哪一条、差多少，才能决定是挪那条线的截止日还是加时长。
+   * 放在最后补一句（而不是和上面两条抢位置）：前面那两条说的是「这周发生了
+   * 什么」，这一条说的是「照着这么走下去会怎样」。
+   */
+  const risky = of('milestoneRisk')
+    .map((d) => (d.kind === 'milestoneRisk' ? plan.milestones.find((m) => m.id === d.milestoneId) : undefined))
+    .filter((m): m is NonNullable<typeof m> => Boolean(m));
+  if (risky.length) {
+    const names = risky.slice(0, 2).map((m) => `「${m.title}」${m.due ? `（${fmtMonthDay(m.due)} 截止）` : ''}`);
+    parts.push(`按现在的进度，${names.join('、')}${risky.length > 2 ? ` 等 ${risky.length} 条线` : ''}可能赶不上`);
+  }
 
   return { text: `${parts.join('；')}。`, chips };
 }
@@ -434,12 +499,17 @@ export function reviewDirection(plan: PlanFile, report: ReviewReport, proposals:
   const overrun = driftOf(report, 'overrun').length;
   const stalled = driftOf(report, 'stalled').length;
   const underrun = driftOf(report, 'underrun').length;
+  const riskyMs = driftOf(report, 'milestoneRisk')
+    .map((d) => (d.kind === 'milestoneRisk' ? plan.milestones.find((m) => m.id === d.milestoneId) : undefined))
+    .filter((m): m is NonNullable<typeof m> => Boolean(m));
 
   const facts: string[] = [];
   if (overdue) facts.push(`${overdue} 项落后`);
   if (overrun) facts.push(`${overrun} 项耗时超预估`);
   if (stalled) facts.push(`${stalled} 项卡住`);
   if (underrun) facts.push(`${underrun} 项比预期快`);
+  // 多目标时「哪条线紧」是这一屏最有价值的一句，所以它也进事实列表
+  if (riskyMs.length) facts.push(`${riskyMs.map((m) => `「${m.title}」`).join('、')}来不及`);
 
   if (proposals.length === 0) {
     return facts.length
@@ -450,11 +520,15 @@ export function reviewDirection(plan: PlanFile, report: ReviewReport, proposals:
   const moves = proposals.filter((p) => p.kind === 'reschedule').length;
   const times = proposals.filter((p) => p.kind === 'estimate').length;
   const adds = proposals.filter((p) => p.kind === 'addTask').length;
+  const retarget = proposals.filter((p) => p.kind === 'milestone').length;
+  const newGoals = proposals.filter((p) => p.kind === 'addMilestone').length;
 
   const plan_ = ['下周'];
   if (moves) plan_.push(`${moves} 项换个日子`);
   if (times) plan_.push(`${times} 项的时长调整一下`);
   if (adds) plan_.push(`补 ${adds} 项练习`);
+  if (retarget) plan_.push(`${retarget} 个目标的截止日往后挪`);
+  if (newGoals) plan_.push(`新增 ${newGoals} 个目标`);
   if (plan_.length === 1) plan_.push(`按下面 ${proposals.length} 处微调`);
 
   return `${facts.length ? `${facts.join('、')}。` : ''}${plan_.join('，')}。`;
