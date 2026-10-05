@@ -37,6 +37,22 @@ constraints:
   blackouts:
     - { from: '2026-11-02', to: '2026-11-06', reason: 期中考试周 }
 
+# 学生档案：访谈里他亲口说过的情况。
+# 放在**文件里**而不是设备上，是为了重开 App 还在、把文件发给同学也跟着走。
+# 类型上是宽松的（parsePlan 之后由 plan/profile.ts 再校验一次），
+# 校验不过就当没有——一份坏档案不该把整份计划卡住。
+profile:
+  goalStatement: 明年四月能独立做出省赛中等难度的题，别再一看到 DP 就放弃
+  deadline: '2027-04-11'
+  level: basic
+  weeklyHours: 10
+  weekdays: [mon, wed, sat, sun]
+  weakSpots:
+    - 动态规划
+    - 图论
+  blackouts:
+    - { from: '2026-11-02', to: '2026-11-06', reason: 期中考试周 }
+
 competences:
   - id: c_dp
     name: 动态规划

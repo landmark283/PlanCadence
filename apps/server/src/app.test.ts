@@ -28,7 +28,7 @@ const TODAY = '2026-10-19';
 /** 示例文件的 meta.updated 是 2026-10-19T21:45:00+08:00，apply 的 at 必须晚于它 */
 const AFTER = '2026-10-20T10:00:00+08:00';
 
-const config: ServerConfig = { port: 0, host: '127.0.0.1', llm: null };
+const config: ServerConfig = { port: 0, host: '127.0.0.1', llm: null, today: null, tz: 'Asia/Shanghai' };
 
 /** 固定返回一段文本的 provider */
 function canned(text: string): LlmProvider & { calls: number } {
@@ -291,15 +291,18 @@ describe('POST /plan/apply', () => {
     await app.close();
   });
 
-  it('时间戳早于 meta.updated 时返回 409（并发保护，不是格式错误）', async () => {
+  it('时间戳早于 meta.updated 不再被拒绝（这条守卫已被删掉）', async () => {
+    // 调试模式把日期往回拨之后，客户端发出来的 at 就会早于 meta.updated。
+    // 一旦这条守卫复活，那种情况下每一次改动都会被 409 挡掉，
+    // 而界面表现只是「点了没反应」——查起来极其费劲。
     const app = await makeApp(null);
     const res = await app.inject({
       method: 'POST',
       url: '/plan/apply',
       payload: { plan: planText, today: TODAY, at: '2026-10-01T10:00:00+08:00' },
     });
-    assert.equal(res.statusCode, 409);
-    assert.match(res.json().error, /早于/);
+    assert.equal(res.statusCode, 200, '不该是 409');
+    assert.ok(res.json().applied > 0);
     await app.close();
   });
 

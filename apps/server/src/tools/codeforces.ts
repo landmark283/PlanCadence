@@ -20,7 +20,7 @@
  * 成功返回赛事数组，失败返回空数组 + 一句人话原因。调用方拿空数组继续跑，
  * 结果退化成纯离线的那一套——赛事区只显示官网入口，其余功能完全不受影响。
  */
-import { Resource } from '@sp/shared';
+import { Resource, dayOf } from '@sp/shared';
 
 /** Codeforces 接口地址。公开、无密钥 */
 const API = 'https://codeforces.com/api/contest.list?gym=false';
@@ -48,23 +48,36 @@ export type FetchContestsOptions = {
   /** 便于测试注入 */
   fetchImpl?: typeof fetch;
   /**
-   * App 认为的「今天」（演示时钟）。
+   * 「现在」（epoch 毫秒）。不传就读真实时钟。
+   *
+   * ## 为什么它必须是参数，不能在这里写 `Date.now()`
+   *
+   * 这个文件以前直接读 `Date.now()`，而调用方同时把 App 的 `today` 传了进来——
+   * 于是同一个请求里「今天」有**两个来源**，而它们真的打过架：
+   * 演示时钟是 2026-10-19，真实的「即将开赛」却按 2026-10-04 过滤，
+   * 结果抓回来的每一场在界面上都显示成「已截止 12 天」。
+   *
+   * 当时的处理是在标题里保留日期、抑制倒计时——那是绕过。
+   * 现在时间统一由服务端时钟给（`SP_TODAY` 冻结时这里也一起冻结），
+   * 两个来源变成同一个，这个矛盾就不存在了。
+   */
+  nowMs?: number;
+  /**
+   * App 认为的「今天」。
    *
    * ## 它只用来决定**要不要给倒计时**，不用来决定「哪些算未来」
    *
-   * 「还没开赛」这件事必须按**真实时钟**判断——一个实时接口返回的
-   * 「即将开始」，意思就是相对现在即将开始。
+   * 「还没开赛」必须按上面那个 `nowMs` 判断——一个实时接口返回的
+   * 「即将开始」，意思就是相对那个时刻即将开始。
    *
-   * 但倒计时是拿 `today` 算的（`daysBetween(today, deadline)`），
-   * 而演示时钟 2026-10-19 比真实日期 2026-10-04 快半个月。
-   * 结果是：真实世界里即将开赛的场次，在演示时钟下全都成了「已截止 12 天」——
-   * 一张写着「已截止」的赛事卡看起来就像程序坏了。
-   *
-   * 所以开赛日**早于 `today` 时不给 `deadline`**：标题里那个日期照样在
-   * （「… · 2026-10-07 开赛」），信息一点没少，只是不显示一个会误导人的倒计时。
-   * 真实用户手上 `today` 就是今天，两者一致，倒计时正常显示。
+   * 但倒计时是拿 `today` 算的（`daysBetween(today, deadline)`）。
+   * 正常模式下 `today` 和 `nowMs` 都来自服务端时钟，两者一致；
+   * 只有在调试模式把客户端日期调得和服务端不一样时才会分叉，
+   * 这时候宁可不给倒计时（标题里的日期照旧），也不要显示一个会误导人的负数。
    */
   today?: string;
+  /** 算「开赛是哪一天」用的时区偏移。不传按东八区 */
+  offsetMinutes?: number;
 };
 
 /**
@@ -77,6 +90,9 @@ export async function fetchCodeforcesContests(opts: FetchContestsOptions = {}): 
   const limit = opts.limit ?? 4;
   const timeoutMs = opts.timeoutMs ?? 8_000;
   const doFetch = opts.fetchImpl ?? fetch;
+  const nowMs = opts.nowMs ?? Date.now();
+  const offset = opts.offsetMinutes ?? 480;
+  const today = opts.today ?? dayOf(nowMs, offset);
 
   try {
     const res = await doFetch(API, {
@@ -97,8 +113,9 @@ export async function fetchCodeforcesContests(opts: FetchContestsOptions = {}): 
 
     const upcoming = body.result
       .filter((c) => c.phase === 'BEFORE' && typeof c.id === 'number' && typeof c.startTimeSeconds === 'number')
-      // 按**真实时钟**过滤「还没开赛」：实时接口说的「即将开始」就是相对现在
-      .filter((c) => c.startTimeSeconds! * 1000 >= Date.now())
+      // 按**同一个时钟**过滤「还没开赛」。以前这里读真实的 Date.now()，
+      // 和调用方传进来的 today 是两个来源，演示时必然打架
+      .filter((c) => c.startTimeSeconds! * 1000 >= nowMs)
       // 按开赛时间从近到远
       .sort((a, b) => a.startTimeSeconds! - b.startTimeSeconds!)
       .slice(0, limit);
@@ -107,12 +124,13 @@ export async function fetchCodeforcesContests(opts: FetchContestsOptions = {}): 
       return { contests: [], source: 'codeforces.com/api', note: '接口里没有即将开始的场次' };
     }
 
-    const verifiedAt = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+    const verifiedAt = new Date(nowMs).toISOString().replace(/\.\d{3}Z$/, 'Z');
     const contests = upcoming.map((c) => {
-      const start = new Date(c.startTimeSeconds! * 1000);
-      const day = start.toISOString().slice(0, 10);
+      // 用服务端时区算「开赛是哪一天」，不用 toISOString().slice(0,10)——
+      // 那是 UTC 的日期，东八区晚上开赛的场次会被算到前一天
+      const day = dayOf(c.startTimeSeconds! * 1000, offset);
       // 开赛日早于 App 认定的今天就不给 deadline，见 FetchContestsOptions.today
-      const countdownOk = !opts.today || day >= opts.today;
+      const countdownOk = day >= today;
       return Resource.parse({
         id: `res_cf_${c.id}`,
         title: `${c.name ?? `Codeforces #${c.id}`} · ${day} 开赛`,

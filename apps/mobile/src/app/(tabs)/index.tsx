@@ -7,33 +7,57 @@
  * 这一屏的焦点应该是**任务列表**（学生是来干活的），目标只是上下文。
  * 所以目标卡走中性面，把主色留给进度条和「选中日」——两处都表示「当前状态」。
  */
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ScrollView, StyleSheet, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import type { Task } from '@sp/shared';
 
 import { AppText } from '@/components/app-text';
-import { Card, SectionLabel } from '@/components/card';
+import { Card, SectionHeader, ChipAction } from '@/components/card';
 import { Chip } from '@/components/chip';
 import { EmptyState } from '@/components/empty-state';
 import { NoticeBanner } from '@/components/notice-banner';
 import { ProgressBar } from '@/components/progress-bar';
-import { ScreenHeader, HeaderAction } from '@/components/screen-header';
+import { ScreenHeader } from '@/components/screen-header';
 import { Screen } from '@/components/screen';
-import { TaskCard } from '@/components/task-card';
+import { ReviewEntry } from '@/components/review-entry';
+import { TalkEntry } from '@/components/talk-entry';
+import { TaskList } from '@/components/task-list';
 import { WeekStrip, type WeekStripDay } from '@/components/week-strip';
 import { fmtFull, fmtMinutes, fmtMonthDay, startOfWeek, weekDays } from '@/lib/dates';
-import { animateNextLayout } from '@/lib/layout-animation';
 import { useCountUp } from '@/hooks/use-count-up';
 import { screenPadding, space } from '@/theme';
 import { usePlanStore } from '@/state/plan-store';
 
 export default function TodayScreen() {
   const router = useRouter();
-  const { plan, loadError, notice, dismissNotice, apply, today } = usePlanStore();
+  const { plan, loadError, notice, dismissNotice, today, pendingSettle, undoSnapshot, undoLastApply } =
+    usePlanStore();
   const [selectedDay, setSelectedDay] = useState(today);
   /** 同时只展开一张卡：展开多张之后，一屏又变回按钮墙 */
   const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  /**
+   * 隔了几天没打开的补账。
+   *
+   * 自动进结账页，因为**这件事只有学生本人能回答**——那几项到底做了没。
+   *
+   * 记的是**上一次弹的是哪一份事实**，而不是一个「弹过了」的布尔量：
+   * 一次会话里可能弹两次（学生在文件页点了「模拟隔了 5 天回来」再点一次），
+   * 用布尔量的话第二次就不会导航，看起来就像按钮坏了。
+   * `settleFacts` 每次都返回新对象，所以按对象身份比较正好。
+   */
+  const promptedFor = useRef<unknown>(null);
+  useEffect(() => {
+    if (!pendingSettle || promptedFor.current === pendingSettle) return;
+    promptedFor.current = pendingSettle;
+    router.push('/settle');
+  }, [pendingSettle, router]);
+
+  /** 选中那天。日期一变（调试模式改日期、跨天）就跟着回到今天 */
+  useEffect(() => {
+    setSelectedDay(today);
+  }, [today]);
 
   const view = useMemo(() => {
     if (!plan) return null;
@@ -69,9 +93,6 @@ export default function TodayScreen() {
       weekDoneCount: weekDone.length,
       spentMin,
       backlog: plan.tasks.filter((x) => !x.scheduledFor),
-      byId: new Map(plan.tasks.map((x) => [x.id, x])),
-      /** 资源 id → 资源。任务卡上要显示挂着的那几条 */
-      resourceById: new Map(plan.resources.map((r) => [r.id, r])),
     };
   }, [plan, today]);
 
@@ -103,71 +124,21 @@ export default function TodayScreen() {
   const dayTasks = view.on(selectedDay);
   const budget = constraints.weeklyMinutes;
 
-  /**
-   * 所有会改动排期的命令都从这里走。
-   *
-   * 改预估或改状态都可能让引擎把任务挪到别的日子——那时卡片会从当前列表里
-   * 消失、后面的卡片往上补位。不做动画的话这一步是「啪」地跳一下，
-   * 而「系统自动重排」恰恰是我们要让学生看见的事。
-   * 纯原生动效（web 上是空操作），理由见 lib/layout-animation.ts
-   */
-  const applyRescheduling = (cmd: Parameters<typeof apply>[0]) => {
-    animateNextLayout();
-    apply(cmd);
-  };
-
-  /**
-   * 任务卡的统一渲染。
-   *
-   * 已排期和待排池两处共用，避免「改了其中一处、另一处忘了改」——
-   * 之前就出现过两段几乎一样的 15 行 JSX。
-   */
-  const renderTask = (tk: Task, variant: 'scheduled' | 'backlog' = 'scheduled') => (
-    <TaskCard
-      key={tk.id}
-      task={tk}
-      variant={variant}
-      // 挂在这条任务上的资料。id 找不到的静默跳过——资源可能被删了，
-      // 而这不该让整张卡炸掉
-      resources={tk.resourceIds.flatMap((rid) => {
-        const r = view.resourceById.get(rid);
-        return r ? [r] : [];
-      })}
-      deps={
-        variant === 'backlog'
-          ? []
-          : tk.dependsOn.flatMap((id) => {
-              const d = view.byId.get(id);
-              return d ? [{ id: d.id, title: d.title, done: d.status === 'done' }] : [];
-            })
-      }
-      expanded={expandedId === tk.id}
-      onToggleExpand={() => setExpandedId((cur) => (cur === tk.id ? null : tk.id))}
-      onToggleDone={() => {
-        const next = tk.status === 'done' ? 'todo' : 'done';
-        applyRescheduling({ type: 'task.setStatus', taskId: tk.id, status: next });
-        // 刚打勾时顺手把卡展开：紧接着要问「实际用了多久」，
-        // 而那是引擎判断超前/落后的唯一输入
-        setExpandedId(next === 'done' ? tk.id : null);
-      }}
-      onSetStatus={(status) => applyRescheduling({ type: 'task.setStatus', taskId: tk.id, status })}
-      onSetEstimate={(estimateMin) => applyRescheduling({ type: 'task.setEstimate', taskId: tk.id, estimateMin })}
-      onSetActual={(actualMin) => applyRescheduling({ type: 'task.setStatus', taskId: tk.id, status: 'done', actualMin })}
-    />
-  );
-
   return (
     <Screen>
       <ScreenHeader
         title="今日"
         meta={`${fmtFull(today)} · 计划 v${plan.version}`}
-        right={
-          <HeaderAction
-            label="重做访谈"
-            accessibilityLabel="重新做一次访谈"
-            onPress={() => router.push('/onboarding')}
-          />
-        }
+        /**
+         * 右上角是**复盘**——它是这一屏唯一的「想干什么」动作。
+         *
+         * 「重做访谈」原来占着这个位置，而它其实是个演示/开发动作
+         * （学生不会想重做一遍访谈），已经挪到文件页的「演示用」区了。
+         *
+         * 复盘入口刻意用一个独立组件：**位置可能随时要改**，
+         * 换地方应该是一处改动。
+         */
+        right={<ReviewEntry />}
       />
 
       <ScrollView
@@ -208,40 +179,77 @@ export default function TodayScreen() {
           ) : null}
         </Card>
 
-        <NoticeBanner notice={notice} onDismiss={dismissNotice} />
+        <NoticeBanner
+          notice={notice}
+          onDismiss={dismissNotice}
+          // 只有「刚应用过一次会话」时才有值；学生一动别的东西它就没了
+          onUndo={undoSnapshot ? undoLastApply : undefined}
+        />
 
         {/* ── 本周负载 ─────────────────────────────────────── */}
         <View style={styles.section}>
-          <SectionLabel>本周安排 · 点日期切换</SectionLabel>
+          <SectionHeader
+            right={
+              <ChipAction
+                label="日历"
+                accessibilityLabel="打开日历，看整个月的安排"
+                onPress={() => router.push('/calendar')}
+              />
+            }
+          >
+            本周安排 · 点日期切换
+          </SectionHeader>
           <WeekStrip days={view.strip} selected={selectedDay} onSelect={setSelectedDay} />
         </View>
 
         {/* ── 选中那天 ─────────────────────────────────────── */}
         <View style={styles.section}>
-          <SectionLabel>
+          <SectionHeader
+            right={
+              <ChipAction
+                label="+ 新任务"
+                accessibilityLabel={`新加一项到${selectedDay === today ? '今天' : fmtFull(selectedDay)}`}
+                // 从哪天点进来就默认排到哪天——学生的心智是「给这天加一件事」
+                onPress={() => router.push({ pathname: '/task/[id]', params: { id: 'new', day: selectedDay } })}
+              />
+            }
+          >
             {selectedDay === today ? '今天' : fmtFull(selectedDay)} · {dayTasks.length} 项
             {view.minutesOn(selectedDay) > 0 ? ` · ${fmtMinutes(view.minutesOn(selectedDay))}` : ''}
-          </SectionLabel>
+          </SectionHeader>
 
-          {dayTasks.length === 0 ? (
-            <EmptyState
-              glyph="○"
-              title={selectedDay === today ? '今天没有安排' : '这天没有安排'}
-              body="可以从下面的待排池挑一项放进来，或者就按现在的节奏休息。"
-            />
-          ) : (
-            <View style={styles.list}>{dayTasks.map((tk) => renderTask(tk))}</View>
-          )}
+          <TaskList
+            tasks={dayTasks}
+            plan={plan}
+            expandedId={expandedId}
+            onToggleExpand={setExpandedId}
+            onOpenEditor={(taskId) => router.push({ pathname: '/task/[id]', params: { id: taskId } })}
+            empty={{
+              glyph: '○',
+              title: selectedDay === today ? '今天没有安排' : '这天没有安排',
+              body: '可以从下面的待排池挑一项放进来，或者就按现在的节奏休息。',
+            }}
+          />
         </View>
 
         {/* ── 待排池 ───────────────────────────────────────── */}
         {view.backlog.length > 0 ? (
           <View style={styles.section}>
-            <SectionLabel>待排 · {view.backlog.length} 项</SectionLabel>
-            <View style={styles.list}>{view.backlog.map((tk) => renderTask(tk, 'backlog'))}</View>
+            <SectionHeader>待排 · {view.backlog.length} 项</SectionHeader>
+            <TaskList
+              tasks={view.backlog}
+              plan={plan}
+              variant="backlog"
+              expandedId={expandedId}
+              onToggleExpand={setExpandedId}
+              onOpenEditor={(taskId) => router.push({ pathname: '/task/[id]', params: { id: taskId } })}
+            />
           </View>
         ) : null}
       </ScrollView>
+
+      {/* 常驻入口：说一句话改计划。它浮在内容上，所以滚动区底部留了它的高度 */}
+      <TalkEntry />
     </Screen>
   );
 }
@@ -251,7 +259,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: screenPadding,
     paddingTop: space.lg,
     // 底部不再加安全区：tab bar 在下面，安全区已由它消费
-    paddingBottom: space.xxxl,
+    // 但要给浮在右下角的〔跟 AI 说说〕留出高度，否则它会盖住最后一张卡
+    paddingBottom: space.xxxl + space.xxl,
     gap: space.xl,
   },
 

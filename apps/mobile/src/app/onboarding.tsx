@@ -39,10 +39,11 @@ import {
 } from '@/components/question-control';
 import { HeaderAction, ScreenHeader } from '@/components/screen-header';
 import { Screen } from '@/components/screen';
+import { SourceBadge } from '@/components/source-badge';
 import { StatRow } from '@/components/stat-row';
 import { draftPlan, fetchNextQuestion, type Source } from '@/lib/api';
 import { screenPadding, space, touchTarget, useTokens } from '@/theme';
-import { nowStamp } from '@/state/clock';
+import { nextStamp } from '@/state/clock';
 import { usePlanStore } from '@/state/plan-store';
 import { PLAN_ID } from '@/state/plan-store';
 
@@ -78,7 +79,7 @@ const initialSession = (): Session => ({
 export default function OnboardingScreen() {
   const t = useTokens();
   const router = useRouter();
-  const { today, saveProfile, installPlan } = usePlanStore();
+  const { today, planRev, installPlan } = usePlanStore();
   const [session, setSession] = useState<Session>(initialSession);
   const [gen, setGen] = useState<{ busy: boolean; error: string | null }>({ busy: false, error: null });
 
@@ -161,9 +162,16 @@ export default function OnboardingScreen() {
 
   const onGenerate = async () => {
     setGen({ busy: true, error: null });
+    /**
+     * 生成要 20–40 秒，这里先记下**发起那一刻**的修订号。
+     *
+     * 学生在这期间如果回到今日页打了勾、改了时长，`installPlan` 会拿这个
+     * 修订号比对，不一致就拒绝装入并说明原因——否则那些修改会被静默覆盖。
+     */
+    const revAtStart = planRev;
     const res = await draftPlan(profile, {
       id: PLAN_ID,
-      now: nowStamp(),
+      now: nextStamp(),
       today,
       title: profile.goalStatement?.slice(0, 40) || '学习计划',
     });
@@ -171,10 +179,14 @@ export default function OnboardingScreen() {
       setGen({ busy: false, error: res.error });
       return;
     }
-    saveProfile(profile);
+    // 档案随计划一起装进去（`installPlan` 的第四个参数）——**一次写盘**。
+    // 分两步会得到两个版本，而且中间失败会留下「有计划、没档案」，
+    // 那正好就是「它不记得我说过的话」。
     installPlan(
       res.value.planText,
       `计划已生成（${res.value.source === 'llm' ? 'AI' : '本机'}）· ${res.value.summary}`,
+      revAtStart,
+      profile,
     );
     setGen({ busy: false, error: null });
     router.replace('/');
@@ -257,12 +269,19 @@ export default function OnboardingScreen() {
           </View>
         </Card>
 
-        {/* 出题来源。和复盘页的「AI 综述 / 系统综述」同一个诚实策略 */}
+        {/* 出题来源。收起成一个小标，点开才解释——它属于「想知道才看」的信息，
+            不该摆在学生正在答题的位置上打断他 */}
         {session.source ? (
-          <AppText variant="caption" tone="textFaint">
-            {session.source === 'llm' ? '题目由 AI 根据你的回答动态生成' : '题目来自本机题库'}
-            {session.note && session.note !== 'ok' ? ` · ${session.note}` : ''}
-          </AppText>
+          <SourceBadge
+            source={session.source}
+            note={session.note}
+            llmLabel="题目由 AI 根据你前面的回答动态生成。"
+            detail={
+              session.source === 'local'
+                ? `题目来自本机题库${session.note && session.note !== 'ok' ? `（${session.note}）` : ''}。断网时不影响继续答。`
+                : undefined
+            }
+          />
         ) : null}
 
         {/* 已经了解到的信息，边答边长。让学生看见"系统确实记住了" */}

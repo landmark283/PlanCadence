@@ -28,6 +28,7 @@ import {
 import type { AdvisorView, PlanFile, PlanIssue, Review } from '@sp/shared';
 import { completeJson } from '@sp/llm-client';
 import type { LlmProvider } from '@sp/llm-client';
+import type { ServerClock } from '../clock.ts';
 
 const DateStr = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, '日期必须是 YYYY-MM-DD');
 const StampStr = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?(Z|[+-]\d{2}:\d{2})?$/, '时间戳必须是 ISO 8601');
@@ -59,17 +60,9 @@ const ApplyBody = PlanText.extend({
     .optional(),
 });
 
-function todayLocal(): string {
-  const d = new Date();
-  const p = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-}
-
-function nowStamp(): string {
-  return new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
-}
-
-/** 解析计划文本，失败时统一成 400 + 结构化问题列表 */
+/**
+ * 解析计划文本，失败时统一成 400 + 结构化问题列表
+ */
 type ReadPlanResult =
   | { ok: true; plan: PlanFile; warnings: PlanIssue[] }
   | { ok: false; error: string; issues: PlanIssue[] };
@@ -80,7 +73,11 @@ function readPlan(text: string): ReadPlanResult {
   return { ok: true, plan: r.plan, warnings: r.warnings };
 }
 
-export function registerPlanRoutes(app: FastifyInstance, provider: LlmProvider | null): void {
+export function registerPlanRoutes(
+  app: FastifyInstance,
+  provider: LlmProvider | null,
+  clock: ServerClock,
+): void {
   /**
    * 根路径。
    *
@@ -101,7 +98,9 @@ export function registerPlanRoutes(app: FastifyInstance, provider: LlmProvider |
       'POST /plan/validate': '校验 .studyplan 文本',
       'POST /plan/review': '复盘：引擎计算 + LLM 叙述（body: { plan, today?, useLlm? }）',
       'POST /plan/apply': '应用调整并返回新文本（body: { plan, today?, at?, accepted? }）',
+      'POST /plan/settle': '补账叙述：把引擎算好的事实说成人话（body: SettleNarrativeInput）',
       'POST /plan/issues': '把校验问题渲染成可读文本',
+      'GET /time': '服务端时间与「今天」（body: 无）',
     },
     docs: 'docs/测试指南.md',
   }));
@@ -141,9 +140,8 @@ export function registerPlanRoutes(app: FastifyInstance, provider: LlmProvider |
     const r = readPlan(body.data.plan);
     if (!r.ok) return reply.code(400).send({ ok: false, error: r.error, issues: r.issues });
 
-    const today = body.data.today ?? todayLocal();
+    const today = body.data.today ?? clock.today();
     const report = reviewPlan(r.plan, today);
-
     let view: AdvisorView;
     let note: string;
 
@@ -186,22 +184,19 @@ export function registerPlanRoutes(app: FastifyInstance, provider: LlmProvider |
     const r = readPlan(body.data.plan);
     if (!r.ok) return reply.code(400).send({ ok: false, error: r.error, issues: r.issues });
 
-    const today = body.data.today ?? todayLocal();
+    const today = body.data.today ?? clock.today();
     const report = reviewPlan(r.plan, today);
     if (!report.adjustments.length) {
       return { ok: true, plan: body.data.plan, version: r.plan.version, applied: 0, warnings: [] };
     }
 
-    const at = body.data.at ?? nowStamp();
-    if (at < r.plan.meta.updated) {
-      // 并发保护：乱序写入会让版本号倒退。用 409 而不是 400——
-      // 这不是「请求格式错」，而是「基于的状态已经旧了」，客户端应重新拉取。
-      return reply.code(409).send({
-        ok: false,
-        error: `时间戳 ${at} 早于计划的 meta.updated（${r.plan.meta.updated}）`,
-        currentVersion: r.plan.version,
-      });
-    }
+    /**
+     * 这里原本还有一条和 `applyCommand` 里一样的「时间戳早于 meta.updated 就 409」。
+     * 一起删掉了（理由见 commands.ts）。如果将来真的需要多写者保护，
+     * 正确的做法是比对**版本号**（`expectedVersion`），而不是比对墙上时钟——
+     * 后者在调试模式把日期往回拨之后会把每一条改动都挡掉。
+     */
+    const at = body.data.at ?? clock.nowStamp();
 
     const accepted = body.data.accepted;
     const chosen = accepted
@@ -226,11 +221,14 @@ export function registerPlanRoutes(app: FastifyInstance, provider: LlmProvider |
     const review: Review | undefined = body.data.review
       ? {
           at,
+          // 这一路是「复盘时应用调整」，所以写的是 review 而不是 settle
+          kind: 'review',
           plannedTasks: body.data.review.plannedTasks,
           completedTasks: body.data.review.completedTasks,
           loadFeedback: body.data.review.loadFeedback ?? null,
           notes: body.data.review.notes ?? '',
           adjustments: [],
+          dialogue: [],
         }
       : undefined;
 

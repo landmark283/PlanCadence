@@ -75,6 +75,8 @@ page.on('pageerror', (e) => problems.push(`pageerror: ${e.message}`));
 const log = [];
 const shot = (name) => page.screenshot({ path: path.join(outDir, `${name}.png`) });
 const planMeta = () => page.locator('div').filter({ hasText: /计划 v\d+/ }).first().textContent().catch(() => '(没读到)');
+/** 从顶栏文字里抠出版本号。放这么早是因为「应用/撤销」那一步（5b）就要用 */
+const versionOf = (s) => Number(/计划 v(\d+)/.exec(s)?.[1] ?? Number.NaN);
 const control = page.locator('[data-testid="question-control"]');
 const stepMeta = () => page.locator('div').filter({ hasText: /^第 \d+ 题/ }).first().textContent().catch(() => '');
 /** 可点的前进按钮。刻意不含「正在取下一题…」——那表示服务端还没回 */
@@ -221,43 +223,147 @@ if ((await firstCheckbox.count()) > 0) {
   log.push('⚠ 计划页上没有可勾选的任务');
 }
 
-/* ── 5. 复盘页看引擎怎么说 ───────────────────────────────── */
-// 注意：底部 tab 的各个屏幕会**同时挂在 DOM 里**（未选中的只是隐藏），
-// 所以不能用「页面里有没有这段文字」来判断当前在哪一屏——
-// 会读到上一屏的内容。要看的是「这一屏专有的元素是否可见」。
-await page.getByRole('tab', { name: '复盘' }).click();
-await page.waitForTimeout(1000);
+/* ── 5. 复盘页：一屏六块里的前四块 ─────────────────────── */
+/**
+ * 复盘**不在底部标签栏里**了（它是推入的整屏）。入口在今日页右上角。
+ *
+ * 所以这一步必须先回今日页、再点那个入口；看完还要**退出来**——
+ * 推入的屏没有标签栏，留在上面的话后面所有点标签的步骤都会失败。
+ */
+async function openReview(label) {
+  await page.getByRole('tab', { name: '今日' }).click();
+  await page.waitForTimeout(700);
+  const entry = page.getByRole('button', { name: '开始复盘，把这一周过一遍' });
+  if ((await entry.count()) === 0) {
+    log.push(`⚠ 今日页上没有复盘入口（${label}）`);
+    return false;
+  }
+  await entry.click();
+  await page.waitForTimeout(1400);
+  return true;
+}
 
-// --waitAi：等模型把综述写完再截图。走本地兜底时永远不会出现「AI 综述」，
+/** 从复盘退出来，回到今日页。走「先不聊了」——它同时也是放弃会话的入口 */
+async function leaveReview() {
+  const quit = page.getByRole('button', { name: '放弃这次复盘' });
+  if ((await quit.count()) > 0) {
+    await quit.click();
+    await page.waitForTimeout(900);
+  } else {
+    // 兜底：直接回首页，别把整条流程卡在推入的屏上
+    await page.goto(`${base}/`, { waitUntil: 'networkidle' });
+    await page.waitForTimeout(900);
+  }
+}
+
+const enteredReview = await openReview('步骤 5');
+if (!enteredReview) log.push('⚠ 没能进入复盘页');
+
+// --waitAi：等模型把方向那句话写完再截图。走本地兜底时永远不会出现「AI」徽标，
 // 所以这个等待只在连着服务端时才有意义（用开关而不是写死，避免白等 60 秒）。
 if (argv.includes('--waitAi')) {
   await page
-    .getByText('AI 综述', { exact: false })
+    .getByText('AI', { exact: true })
     .first()
     .waitFor({ state: 'visible', timeout: 90_000 })
-    .then(() => log.push('模型综述已返回'))
-    .catch(() => log.push('⚠ 等待模型综述超时'));
+    .then(() => log.push('模型方向已返回'))
+    .catch(() => log.push('⚠ 等待模型方向超时'));
 }
 
-await shot('93-review-after-checkin');
+await shot('93-review');
 
-const onReview = await page.getByText(/系统综述|AI 综述/, { exact: false }).first().isVisible().catch(() => false);
-log.push(`复盘页可见：${onReview ? '是' : '⚠ 否'}`);
+const factsVisible = await page.getByText('这周发生了什么', { exact: false }).first().isVisible().catch(() => false);
+log.push(`复盘「这周发生了什么」：${factsVisible ? '✓ 可见' : '⚠ 不可见'}`);
 
-if (onReview) {
-  const narrative = await page
-    .locator('div')
-    .filter({ hasText: /^(系统综述|AI 综述)/ })
-    .last()
-    .textContent()
-    .catch(() => '');
-  log.push(`综述来源与内容：${narrative.replace(/\s+/g, ' ').slice(0, 120)}`);
+// 事实句子来自引擎，断网时也必须有一句
+const factsText = await page.getByText(/项落后|项超预估|项比预期快|没有发现偏差|已经过期|实际花了预估的/).first().textContent().catch(() => null);
+log.push(`事实：${(factsText ?? '（没读到）').replace(/\s+/g, ' ').slice(0, 90)}`);
 
-  const driftChips = await page.getByText(/项耗时超预估|项比预期快|项落后|个里程碑有风险/).allTextContents();
-  log.push(`偏差标签：${[...new Set(driftChips)].join(' | ') || '（无）'}`);
+// 方向那句话以事实开头（「1 项耗时超预估。下周，…」），所以**不能锚定行首**
+const direction = await page.getByText(/下周|按现在的节奏继续/).first().textContent().catch(() => null);
+log.push(`方向：${(direction ?? '（没读到）').replace(/\s+/g, ' ').slice(0, 90)}`);
 
-  const section = await page.getByText(/^待确认的调整|^本周无需调整/).first().textContent().catch(() => '');
-  log.push(`调整区：${section.replace(/\s+/g, ' ').slice(0, 80)}`);
+const cardHeading = await page.getByText(/^帮你写好的卡片 · \d+ 张$/).first().textContent().catch(() => null);
+log.push(`卡片区：${cardHeading ?? '⚠ 没读到'}`);
+
+/**
+ * **卡片里的日期不能早于今天。**
+ *
+ * 这条来自一个真 bug：会话开得太早（时钟还没接上），引擎按设备日期算排期，
+ * 卡片上就出现了相对真实今天已经过去的日期。断言把它钉住——
+ * 从页面上的日期文本里挑出「M/D」，任何一个早于头部那个日期就是回归。
+ */
+const headDate = await page.getByText(/^\d+月\d+日 周[一二三四五六日] · 计划 v/).first().textContent().catch(() => null);
+const todayMD = headDate ? /^(\d+)月(\d+)日/.exec(headDate) : null;
+if (todayMD) {
+  const todayKey = Number(todayMD[1]) * 100 + Number(todayMD[2]);
+  const changes = await page.getByText(/^待排池 →|^\d+\/\d+ 周[一二三四五六日] →/).allTextContents();
+  const tooEarly = changes.filter((c) => {
+    const m = /^(\d+)\/(\d+) 周/.exec(c.trim());
+    if (!m) return false;
+    return Number(m[1]) * 100 + Number(m[2]) < todayKey;
+  });
+  log.push(
+    `卡片日期不早于今天（${todayMD[1]}/${todayMD[2]}）：` +
+      `${changes.length} 条里 ${tooEarly.length} 条过早 ${tooEarly.length ? '⚠ ' + tooEarly.join('、') : '✓'}`
+  );
+} else {
+  log.push('⚠ 没读到复盘的日期，跳过卡片日期检查');
+}
+
+// 退出复盘再往下走：推入的整屏**没有标签栏**，留在上面后面每一步点标签都会超时
+await leaveReview();
+
+/* ── 5b. 应用复盘的建议，然后撤销 ───────────────────────── *
+ * 撤销是这一轮新加的能力，也是唯一一个「会改计划」的按钮的反悔权。
+ * 两条要验的性质：
+ *   1. 应用之后通知上有〔撤销〕，而且撤销**真的把计划恢复回去了**；
+ *   2. 撤销只对紧接着的那一次负责——再动一下别的东西，它就该消失。
+ *
+ * 顺带一个好处：撤销之后计划回到应用前，所以后面每一步看到的还是同一份计划。
+ */
+await openReview('步骤 5b');
+const applyReview = page.getByRole('button', { name: /^应用 \d+ 张$/ });
+if ((await applyReview.count()) === 0) {
+  log.push('（这一步的复盘没有给出建议，跳过「应用 + 撤销」）');
+} else {
+  const beforeApply = versionOf(await planMeta());
+  await applyReview.first().click();
+  await page.waitForTimeout(2000);
+
+  const vApplied = versionOf(await planMeta());
+  const undoBtn = page.getByRole('button', { name: '撤销刚才这次改动' });
+  const hasUndo = (await undoBtn.count()) > 0;
+  log.push(
+    `应用复盘建议：v${beforeApply} → v${vApplied} ` +
+      `${vApplied === beforeApply + 1 ? '✓ 只前进一版' : `⚠ 版本变化是 ${vApplied - beforeApply}`} · ` +
+      `〔撤销〕${hasUndo ? '✓ 有' : '⚠ 没有'}`
+  );
+  await shot('93b-applied-with-undo');
+
+  if (hasUndo) {
+    await undoBtn.first().click();
+    await page.waitForTimeout(2200);
+    const vUndone = versionOf(await planMeta());
+    const saysUndone = await page.getByText('已撤销刚才那次改动').count();
+    log.push(
+      `撤销：v${vApplied} → v${vUndone} ` +
+        `${vUndone === vApplied + 1 ? '✓ 恢复也是一次正常写入（+1 版）' : `⚠ 版本变化是 ${vUndone - vApplied}`} · ` +
+        `提示${saysUndone ? '✓ 有' : '⚠ 没有'}`
+    );
+
+    // 再动一下别的东西：撤销入口应该消失（它不是版本管理，是一次动作的反悔权）
+    // `:visible` 是必须的：栈里可能同时挂着两屏，按 DOM 顺序取到的第一个未必是看得见的那个
+    const anyBox = page.locator('[role="checkbox"]:visible').first();
+    if ((await anyBox.count()) > 0) {
+      await anyBox.click();
+      await page.waitForTimeout(1500);
+      const stillThere = await page.getByRole('button', { name: '撤销刚才这次改动' }).count();
+      log.push(
+        `再改动一次之后〔撤销〕：${stillThere === 0 ? '✓ 已消失（只活到下一次改动之前）' : '⚠ 还在，边界没守住'}`
+      );
+    }
+  }
 }
 
 /* ── 6. 文件页：真的落盘了吗 ─────────────────────────────── */
@@ -268,11 +374,39 @@ await shot('94-file-tab');
 const backend = await page.getByText(/设备文件系统|浏览器存储/).first().textContent().catch(() => '');
 const raw = await page.getByText(/studyplan\/v1/).first().textContent().catch(() => '');
 const saveState = await page.getByText(/已保存到设备|正在写入|保存失败|已暂停写入|尚未写入/).first().textContent().catch(() => '');
-const snaps = await page.getByText(/^版本快照 · \d+ 个$/).first().textContent().catch(() => '(没读到)');
-log.push(`文件页：后端=${backend} 状态=${saveState} 文件含 studyplan/v1=${raw.includes('studyplan/v1') ? '是' : '否'} ${snaps}`);
+log.push(`文件页：后端=${backend} 状态=${saveState} 文件含 studyplan/v1=${raw.includes('studyplan/v1') ? '是' : '否'}`);
+/**
+ * 「这一页显示的是盘上那份文件」这件事，得有个真判据。
+ *
+ * 版本快照列表那一块随「取消版本管理」一起撤掉了，所以原来读
+ * 「版本快照 · N 个」的断言变成了永远读不到的摆设——一个永远不会失败的检查
+ * 不是检查。换成拿**页头的版本号**和**正文里的 version:** 对一次：
+ * 两处对得上，才说明预览不是内存里重新序列化出来的字符串。
+ */
+// 不写死 plan id：连真实模型那条路径生成出来的 id 可能不是示例里那个，
+// 钉死 id 会变成一条只在离线路径上成立的断言
+const fileMeta = (await page.getByText(/· v\d+ ·/).first().textContent().catch(() => '')) ?? '';
+const fileVersion = Number(/v(\d+)/.exec(fileMeta)?.[1] ?? Number.NaN);
+const rawVersion = Number(/version:\s*(\d+)/.exec(raw)?.[1] ?? Number.NaN);
+log.push(
+  `文件页版本：页头 v${fileVersion} · 正文 version: ${rawVersion} ` +
+    (fileVersion === rawVersion ? '✓ 预览就是盘上那份' : '⚠ 对不上'),
+);
+
+/**
+ * 学生档案。
+ *
+ * 断言落在**整个卡片**上而不是某一句人话上：访谈答了哪几题不固定，
+ * `describeProfile` 拼出来的摘要就跟着变，钉死一句话会变成一个假失败。
+ * 这里要证的是「文件里有档案、界面也读出来了」——
+ * 而「还没有档案」只会在 `readProfile` 返回 null 时出现。
+ */
+const archive = page.locator('[data-testid="student-profile"]');
+const archiveText = ((await archive.first().textContent().catch(() => '')) ?? '').replace(/\s+/g, ' ').trim();
+const archiveSaved = archiveText.includes('已随文件保存');
+log.push(`学生档案：${archiveSaved ? '✓ 已随文件保存' : '⚠ 显示为没有档案'} · ${archiveText.slice(0, 110)}`);
 
 /* ── 7. 刷新后计划还在吗（持久化唯一的真凭据） ───────────── */
-const versionOf = (s) => /计划 v(\d+)/.exec(s)?.[1] ?? '?';
 await page.getByRole('tab', { name: '今日' }).click();
 await page.waitForTimeout(700);
 const beforeReload = versionOf(await planMeta());
@@ -285,6 +419,27 @@ const afterReload = versionOf(await planMeta());
 await shot('95-after-reload');
 
 log.push(`刷新前 v${beforeReload} → 刷新后 v${afterReload} ${beforeReload === afterReload ? '✓ 计划留住了' : '⚠ 计划丢了'}`);
+
+/**
+ * 档案的持久化要用**同一个刷新**来验。
+ *
+ * 「重开 App 它还记得你是谁」这句话唯一的凭据就在这里：刷新之后
+ * 界面上的档案只能是 `hydrate` → `readProfile(plan)` 读出来的，
+ * 内存里那份镜像已经随刷新没了。
+ */
+await page.getByRole('tab', { name: '文件' }).click();
+await page.waitForTimeout(1400);
+const archiveAfterReload = (
+  (await page.locator('[data-testid="student-profile"]').first().textContent().catch(() => '')) ?? ''
+).replace(/\s+/g, ' ');
+log.push(
+  archiveAfterReload.includes('已随文件保存')
+    ? `刷新后学生档案：✓ 还在（内存镜像已随刷新清零，这份只能是从文件里读回来的）`
+    : '⚠ 刷新后学生档案没了',
+);
+await shot('95b-after-reload-archive');
+await page.getByRole('tab', { name: '今日' }).click();
+await page.waitForTimeout(600);
 
 /* ── 8. 刷新后还能操作吗（时钟对齐的验证） ───────────────── */
 // 重启会把演示时钟的内存游标归零，而文件里的 meta.updated 已经前进过了。
@@ -354,8 +509,7 @@ if ((await findBtn.count()) > 0) {
    * 所以这里只把标题读出来记一笔，不去 DOM 里翻列表——
    * 按文本抓"那一列"会连祖先节点一起抓到，读出来的数字没有意义。
    */
-  await page.getByRole('tab', { name: '复盘' }).click();
-  await page.waitForTimeout(1500);
+  await openReview('步骤 10');
   const cautionLabel = await page
     .getByText(/^提醒 · \d+ 条$|^提醒$/)
     .first()
@@ -363,8 +517,7 @@ if ((await findBtn.count()) > 0) {
     .catch(() => null);
   log.push(`复盘页提醒区：${cautionLabel ?? '（这一版没有提醒）'}`);
   await shot('97b-review-after-resources');
-  await page.getByRole('tab', { name: '今日' }).click();
-  await page.waitForTimeout(500);
+  await leaveReview();
 } else {
   log.push('⚠ 资源页没有找到「按计划内容检索资料」按钮');
 }
@@ -405,53 +558,257 @@ for (const [label, ext] of [
   );
 }
 
-/* ── 11. 版本历史与回滚 ─────────────────────────────────── *
- * 快照一直在写，但界面入口是这一轮才补上的。要验的是**回滚真的换了内容**，
- * 而不只是"按钮点了没报错"。
+/* ── 10b. 日历：入口、整月负载、翻月、点一天看那天 ────────── *
+ * 分两段验，因为它们要证的是两件事：
+ *   1. 今日页上那个「日历」按钮**真的会导航**（点它、看到只有日历屏才有的标题）
+ *   2. 日历屏本身的行为（42 格、翻月、点一天换列表）
+ *
+ * 第 2 段**直接打开 `/calendar`**，而不是顺着第 1 段点下去。
+ * 原因是个真实的坑：推入的屏不会把上一屏卸载，而周条和月历的格子
+ * 无障碍标签长得一模一样（都是「19 日，2 项任务」），
+ * 接着数会得到 42 + 7 = 49 个格子，分不清哪个是哪个。
+ * 直接打开就只有一个屏，断言才是确定的。
  */
-const beforeRollback = versionOf(await planMeta());
-const histLink = page.getByRole('button', { name: '查看版本历史' });
-if ((await histLink.count()) > 0) {
-  await histLink.click();
+await page.getByRole('tab', { name: '今日' }).click();
+await page.waitForTimeout(600);
+const calBtn = page.getByRole('button', { name: '打开日历，看整个月的安排' });
+if ((await calBtn.count()) > 0) {
+  await calBtn.click();
+  await page.waitForTimeout(1300);
+  const onCal = await page
+    .getByText(/^\d{4} 年 \d+ 月 · 本月 \d+ 项/)
+    .first()
+    .isVisible()
+    .catch(() => false);
+  log.push(`点「日历」：${onCal ? '✓ 进了日历屏' : '⚠ 没进去'}`);
+  await shot('96b-calendar-enter');
+} else {
+  log.push('⚠ 今日页上没有「日历」按钮');
+}
+
+await page.goto(`${base}/calendar`, { waitUntil: 'networkidle' });
+await page.waitForTimeout(1300);
+
+const cells = page.locator('[aria-label*=" 项任务"]');
+const cellCount = await cells.count();
+log.push(`月历格子数：${cellCount}${cellCount === 42 ? ' ✓ 固定 6 行（高度不会随月份跳）' : ' ⚠ 应该是 42'}`);
+const firstCell = await cells.first().getAttribute('aria-label');
+log.push(`第一格：${firstCell ?? '（没读到）'}（周一为一周之首）`);
+
+const monthLabel = () => page.getByText(/^\d{4} 年 \d+ 月$/).first().textContent().catch(() => '(没读到)');
+const m0 = await monthLabel();
+await page.getByRole('button', { name: '下一个月' }).click();
+await page.waitForTimeout(700);
+const m1 = await monthLabel();
+await page.getByRole('button', { name: '上一个月' }).click();
+await page.waitForTimeout(700);
+const m2 = await monthLabel();
+log.push(
+  `翻月：${m0} → ${m1} → ${m2} ${m1 !== m0 && m2 === m0 ? '✓ 能翻也能翻回来' : '⚠ 翻月不对'}`,
+);
+
+// 「14 日」只在月历里出现（周条只画当周那七天），所以这个定位不会有歧义
+await page.getByRole('button', { name: /^14 日，/ }).first().click();
+await page.waitForTimeout(900);
+const dayHeading = await page
+  .getByText(/^(今天|\d+月\d+日 周[一二三四五六日]) · \d+ 项/)
+  .last()
+  .textContent()
+  .catch(() => null);
+const h = (dayHeading ?? '（没读到）').replace(/\s+/g, ' ');
+log.push(`点「14 日」之后：${h} ${h && !h.startsWith('今天') ? '✓ 下面换成了那天' : '⚠ 没跟着换'}`);
+await shot('96c-calendar-day');
+
+const backBtn = page.getByRole('button', { name: '回到今日页' });
+if ((await backBtn.count()) > 0) {
+  await backBtn.click();
+  await page.waitForTimeout(1100);
+  const backHome = await page.getByRole('button', { name: '打开日历，看整个月的安排' }).count();
+  log.push(`从日历返回：${backHome > 0 ? '✓ 回到今日页' : '⚠ 没回去'}`);
+} else {
+  log.push('⚠ 日历屏上没有「返回」');
+}
+
+/* ── 11. 回归结账 ───────────────────────────────────────── *
+ * 这一步验的是这一轮新加的那条链路：隔了几天再打开时，系统得自己发现
+ * 「有几项已经过期了」，而不是把一张什么都没变的表格继续摆在那儿。
+ *
+ * 演示当天没法真的等一天，所以走文件页那个「模拟隔了 5 天回来」按钮——
+ * 它同时是演示开关和这条链路的测试入口。
+ *
+ * 先把固定日期设成**当前这一天**（点「今天」），而不是写死一个日期：
+ * 窗口是 (今天, 今天+5]，而计划是围绕「今天」生成的。写死一个日期的话，
+ * 这条断言会变成在赌「今天几号」，跟功能好坏没关系。
+ *
+ * **但光钉住日期还不够。** 2026-10-05（周一）那天跑，这一步报的是
+ * 「结账页上没有找到确认按钮」——不是功能坏了，而是：访谈里学生只勾了
+ * 「周一晚上」，而那天**正好是周一**，于是生成计划把所有任务都排到了今天，
+ * 正好落在结算区间**左开的那个端点之外**（「上次打开那天不算欠账」是设计如此），
+ * 窗口里一项都没有。这条断言其实还依赖了「今天是周几」。
+ *
+ * 修法是让窗口里**一定会有一项**：现场新建一项排到明天。
+ * 新任务必定是 todo，明天必定落在 (今天, 今天+5] 里，于是与星期几无关。
+ * 顺带把新建这条路径也走了一遍。
+ */
+await page.getByRole('tab', { name: '今日' }).click();
+await page.waitForTimeout(700);
+const addBtn = page.getByRole('button', { name: /^新加一项到/ });
+if ((await addBtn.count()) > 0) {
+  await addBtn.first().click();
   await page.waitForTimeout(1200);
-  await shot('98-history');
+  await page.locator('[aria-label="任务标题"]').fill('结算用的临时任务');
+  await page.getByRole('button', { name: '排到明天' }).click();
+  await page.waitForTimeout(400);
+  // `exact: true` 是必须的：编辑页顶部的「返回」无障碍标签是「不保存，返回」，
+  // 而 Playwright 的 name 默认是子串匹配，不加就会同时命中两个
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  await page.waitForTimeout(1600);
+  const created = await page.getByText('结算用的临时任务').count();
+  log.push(`新建一项排到明天：${created > 0 ? '✓ 卡片出现了' : '⚠ 没看到新卡片'}`);
+  await shot('97b-created-task');
+} else {
+  log.push('⚠ 今日页上没有「+ 新任务」入口');
+}
 
-  const rollback = page.getByRole('button', { name: /^回滚到 v\d+$/ });
-  const n = await rollback.count();
-  if (n > 0) {
-    const targetLabel = await rollback.nth(n - 1).getAttribute('aria-label');
-    const target = Number((targetLabel ?? '').match(/v(\d+)/)?.[1] ?? 0);
-    await rollback.nth(n - 1).click();
-    await page.waitForTimeout(300);
-    // 两步确认：第二次点击才真的执行
-    const confirm = page.getByRole('button', { name: `确认回滚到 v${target}` });
-    if ((await confirm.count()) > 0) await confirm.click();
-    await page.waitForTimeout(2000);
-    const after = versionOf(await planMeta());
-    await page.waitForTimeout(500);
-    await shot('99-after-rollback');
+await page.getByRole('tab', { name: '文件' }).click();
+await page.waitForTimeout(700);
 
-    /**
-     * 版本号变了还不够——要证明**内容**真的回到了那一版。
-     * 最省事的判据是资源条数：找资料是在 v1 之后做的，
-     * 回滚到 v1 就该把后来加的那些丢掉。
-     */
-    await page.getByRole('tab', { name: '资源' }).click();
-    await page.waitForTimeout(900);
-    const resAfter = await page.locator('[aria-label^="打开 "]').count();
-    log.push(
-      `版本历史：${n} 个历史版本 · 从 v${beforeRollback} 回滚 v${target} → 现在 v${after}` +
-        `${after > beforeRollback ? '，版本继续前进 ✓' : '，⚠ 版本没动'}`,
-    );
-    log.push(
-      `回滚后的内容：资源卡 ${resourceCardCount} → ${resAfter} ` +
-        `${resAfter < resourceCardCount ? '✓ 后面的改动被丢掉了，确实回到了旧版本' : '⚠ 内容没变，回滚可能没生效'}`,
-    );
+const fixedMode = page.getByRole('button', { name: '时间固定在指定日期' });
+if ((await fixedMode.count()) === 0) {
+  log.push('⚠ 文件页上没有「固定日期」开关');
+} else {
+  await fixedMode.click();
+  await page.waitForTimeout(400);
+
+  const todayChip = page.getByRole('button', { name: '固定日期改为今天' });
+  if ((await todayChip.count()) > 0) {
+    await todayChip.click();
+    await page.waitForTimeout(600);
   } else {
-    log.push('⚠ 版本历史页上没有可回滚的版本');
+    log.push('⚠ 没有找到「今天」快捷档位');
+  }
+
+  // 顺带验一下任意日期输入是活的：填一个未来的日期应该立刻生效
+  const dateInput = page.locator('[aria-label="固定日期，格式为年-月-日"]');
+  if ((await dateInput.count()) > 0) {
+    await dateInput.fill('2026-12-25');
+    await dateInput.press('Enter');
+    await page.waitForTimeout(500);
+    const arbitrary = await page.getByText(/今天是 2026-12-25/).count();
+    log.push(`任意日期输入：${arbitrary > 0 ? '✓ 能设成 2026-12-25' : '⚠ 填了没生效'}`);
+    // 放回今天，免得下面那个窗口里一项任务都没有
+    if ((await todayChip.count()) > 0) await todayChip.click();
+    await page.waitForTimeout(500);
+  } else {
+    log.push('⚠ 没有找到固定日期的输入框');
+  }
+  await shot('98-clock-fixed');
+
+  /**
+   * 结算前的版本号必须在**所有准备动作之后**取。
+   *
+   * 上面「新建一项排到明天」本身就 +1 版；如果拿它之前的号来比，
+   * 这里会报「版本变化是 2」——看起来像结算多推了一版，
+   * 其实是量错了基准。第一次跑就是这么误报的。
+   */
+  const beforeSettle = versionOf(await planMeta());
+
+  const simulate = page.getByRole('button', { name: '模拟隔了五天回来' });
+  if ((await simulate.count()) > 0) {
+    await simulate.click();
+    await page.waitForTimeout(1500);
+    await shot('99-settle');
+
+    // 结账页出现之后，先把清单读出来
+    const heading = await page
+      .getByText(/^这 \d+ 项，实际情况是$/)
+      .first()
+      .textContent()
+      .catch(() => null);
+    const summary = await page
+      .getByText(/距上次打开过了 \d+ 天|这期间/)
+      .first()
+      .textContent()
+      .catch(() => null);
+    log.push(`结账页：${heading ?? '（没读到清单标题）'}`);
+    log.push(`叙述：${(summary ?? '（没读到）').replace(/\s+/g, ' ').slice(0, 90)}`);
+
+    const confirm = page.getByRole('button', { name: '确认' });
+    if (heading && (await confirm.count()) > 0) {
+      await confirm.click();
+      await page.waitForTimeout(2500);
+      const after = versionOf(await planMeta());
+      log.push(
+        `结账：v${beforeSettle} → v${after} ` +
+          `${after === beforeSettle + 1 ? '✓ 只前进了一版（一次结算 = 一条命令）' : `⚠ 版本变化是 ${after - beforeSettle}`}`,
+      );
+
+      // 内容真的变了吗？默认「放回待排池」，所以待排池应该变长了
+      await page.getByRole('tab', { name: '今日' }).click();
+      await page.waitForTimeout(800);
+      const backlog = await page.getByText(/^待排 · \d+ 项$/).first().textContent().catch(() => null);
+      const settled = await page.getByText(/结账 [\d-]+ ~ [\d-]+/).first().textContent().catch(() => null);
+      log.push(`结账后今日页：${(settled ?? '（没读到通知）').replace(/\s+/g, ' ').slice(0, 80)} · ${backlog ?? '没有待排区'}`);
+      await shot('99b-after-settle');
+    } else {
+      // 走到这里说明连「明天有一项」都没让它出现，那多半是真出问题了。
+      // 把系统的原话带出来，省得下次还得靠猜
+      const why = await page
+        .getByText(/之间没有需要结算的任务|计划文件读取失败|存储不可用/)
+        .first()
+        .textContent()
+        .catch(() => null);
+      log.push(`⚠ 结账页上没有「确认」按钮${why ? `（系统说：${why.replace(/\s+/g, ' ')}）` : ''}`);
+    }
+  } else {
+    log.push('⚠ 文件页上没有「模拟隔了 5 天回来」按钮');
+  }
+
+  // 把时钟放回正常模式，别把调试状态留给下一次跑
+  const liveMode = page.getByRole('button', { name: '时间跟随服务器' });
+  if ((await liveMode.count()) > 0) await liveMode.click();
+  await page.waitForTimeout(400);
+}
+
+/* ── 11b. 跟 AI 说说：断网时必须**明说不可用** ───────────── *
+ * 这一条没有本机兜底，而这是**有意的**：自然语言理解本机做不到，
+ * 做一个「只听得懂三句话」的关键词解析器，学生试两次失败之后就不信它了。
+ *
+ * 所以这里要验的不是「它能工作」，而是「它不会假装在工作」：
+ * 打一句话 → 那句话还在（不丢）→ 明确说现在用不了 → 给手动入口。
+ */
+await page.getByRole('tab', { name: '今日' }).click();
+await page.waitForTimeout(700);
+const talkFab = page.getByRole('button', { name: '跟 AI 说说你的计划' });
+if ((await talkFab.count()) > 0) {
+  await talkFab.click();
+  await page.waitForTimeout(1200);
+
+  const hasExamples = await page.getByText('试试这样说').first().isVisible().catch(() => false);
+  log.push(`跟 AI 说说空态：${hasExamples ? '✓ 给了三个可用例子' : '⚠ 没有例子'}`);
+
+  await page
+    .getByRole('button', { name: /^用这个例子：/ })
+    .first()
+    .click();
+  await page.waitForTimeout(2500);
+
+  const saidSo = await page.getByText('现在用不了').first().isVisible().catch(() => false);
+  const manual = await page.getByRole('button', { name: '打开日历，自己挪' }).count();
+  const keptWord = await page.getByText('周三晚上有事').first().isVisible().catch(() => false);
+  log.push(
+    `断网时：${saidSo ? '✓ 明说「现在用不了」' : '⚠ 没明说（可能在假装工作）'} · ` +
+      `手动入口 ${manual} 个 · 那句原话${keptWord ? '还在' : '⚠ 丢了'}`
+  );
+  await shot('100b-talk-offline');
+
+  const backFromTalk = page.getByRole('button', { name: '返回' }).first();
+  if ((await backFromTalk.count()) > 0) {
+    await backFromTalk.click();
+    await page.waitForTimeout(900);
   }
 } else {
-  log.push('⚠ 文件页上没有「查看版本历史」入口');
+  log.push('⚠ 今日页上没有「跟 AI 说说」入口');
 }
 
 /* ── 12. 演示模式（现场保险） ────────────────────────────── */

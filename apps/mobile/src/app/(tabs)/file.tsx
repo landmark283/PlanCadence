@@ -13,12 +13,13 @@
 import { useEffect, useState } from 'react';
 import { Platform, ScrollView, StyleSheet, View } from 'react-native';
 import { useRouter } from 'expo-router';
-import { exportBaseName, toIcs, toMarkdown } from '@sp/shared';
+import { addDays, describeProfile, exportBaseName, isDay, missingProfileFields, toIcs, toMarkdown } from '@sp/shared';
 
 import { AppText } from '@/components/app-text';
 import { PrimaryButton } from '@/components/bottom-bar';
 import { Card, SectionLabel } from '@/components/card';
 import { Chip, type ChipTone } from '@/components/chip';
+import { Input } from '@/components/input';
 import { ScreenHeader } from '@/components/screen-header';
 import { Screen } from '@/components/screen';
 import { DEMO_PLAN_TEXT } from '@/fixtures/demo-plan';
@@ -26,7 +27,6 @@ import { copyText } from '@/lib/clipboard';
 import { useOfflineOnly, setOfflineOnly } from '@/lib/demo-mode';
 import { deliverTextFile } from '@/lib/export-file';
 import { PLAN_ID, usePlanStore, useStorageInfo, type SaveStatus } from '@/state/plan-store';
-import { planStorage } from '@/storage/plan-storage';
 import { screenPadding, space } from '@/theme';
 
 /** 文件大小。中文一个字三字节，所以按 UTF-8 算而不是 `text.length` */
@@ -51,30 +51,45 @@ const SAVE_LABEL: Record<SaveStatus, { text: string; tone: ChipTone }> = {
 
 export default function FileScreen() {
   const router = useRouter();
-  const { plan, planText, save, loadError, installPlan, forceOverwrite, retryLoad, notify, today } = usePlanStore();
+  const {
+    plan,
+    planText,
+    profile,
+    save,
+    loadError,
+    installPlan,
+    forceOverwrite,
+    retryLoad,
+    notify,
+    today,
+    realToday,
+    clockSource,
+    clockSetting,
+    setClock,
+    simulateDaysLater,
+  } = usePlanStore();
   const info = useStorageInfo();
   const status = SAVE_LABEL[save.status];
   const offlineOnly = useOfflineOnly();
+  // 缺哪几项是给「访谈做了一半」用的：档案在，但还说不出目标或截止日。
+  // 没有档案时不显示它——那时该说的是「做过访谈就有了」，不是列一串缺项。
+  const missing = profile ? missingProfileFields(profile) : [];
 
   /**
-   * 版本快照列表。
+   * 固定日期的输入草稿。
    *
-   * 每次变更都会留下**上一版的整份快照**（`saveWithSnapshot` 写的）。
-   * 回滚走快照而不是重放命令：重放要求命令永久向后兼容，代价高且容易错。
-   * 把数量显示出来，一是让「可回滚」这件事可见，二是顺带证明存储适配器的
-   * `listSnapshots` 真的在工作——它是最容易写成空实现的一个方法。
+   * 必须有一份本地草稿：学生打字的过程中每一次按键都会产生一个「还不合法」的
+   * 中间状态（`2026-1`），如果每次都直接写进设置，时钟会在打字打到一半时
+   * 被改成一个非法值。所以草稿和生效值是分开的，只有真的合法才提交。
    */
-  const [snapshots, setSnapshots] = useState<number[]>([]);
+  const [dateDraft, setDateDraft] = useState(clockSetting.date ?? '');
   useEffect(() => {
-    let alive = true;
-    void planStorage.listSnapshots(PLAN_ID).then((v) => {
-      if (alive) setSnapshots(v);
-    });
-    return () => {
-      alive = false;
-    };
-    // 版本变了或刚写完盘，快照列表都可能变
-  }, [plan?.version, save.status]);
+    setDateDraft(clockSetting.date ?? '');
+  }, [clockSetting.date]);
+
+  const commitDate = () => {
+    if (isDay(dateDraft)) setClock({ mode: 'debug', date: dateDraft });
+  };
 
   /**
    * 导出。
@@ -150,6 +165,43 @@ export default function FileScreen() {
                 {save.message}
               </AppText>
             ) : null}
+            <AppText variant="caption" tone="textFaint">
+              每次改动都会在 versions/ 里留一份上一版的完整内容。文件只有几十 KB，
+              留一份不心疼；真出了事，那份文件是可以直接打开手动恢复的。
+            </AppText>
+          </Card>
+        </View>
+
+        <View style={styles.section}>
+          <SectionLabel>学生档案</SectionLabel>
+          <Card bordered style={styles.stack} testID="student-profile">
+            <View style={styles.row}>
+              <Chip tone={profile ? 'accent' : 'neutral'}>{profile ? '已随文件保存' : '还没有档案'}</Chip>
+              {profile && missing.length ? <Chip tone="warning">还缺 {missing.length} 项</Chip> : null}
+            </View>
+
+            {profile ? (
+              <>
+                <AppText variant="label">{profile.goalStatement ?? '（没写目标）'}</AppText>
+                <AppText variant="caption" tone="textMuted">
+                  {describeProfile(profile) || '（档案是空的，访谈只开了个头）'}
+                </AppText>
+              </>
+            ) : (
+              <AppText variant="label" tone="textMuted">
+                这份计划里没有档案。做过一次访谈之后它就写进来了——「跟 AI 说说」和找资料
+                都靠它知道你是谁，而不是从任务表反推。
+              </AppText>
+            )}
+
+            <AppText variant="caption" tone="textFaint">
+              它住在文件正文里（`profile:` 开头那一段），不是存在这台设备上：重开 App 它还在，
+              换设备、把文件发给同学，上下文也跟着走。
+            </AppText>
+            <AppText variant="caption" tone="textFaint">
+              档案读不出来时只当没有，不会让整份计划读不出来——文件里你亲手写的任务
+              比一段背景描述重要得多。
+            </AppText>
           </Card>
         </View>
 
@@ -168,38 +220,111 @@ export default function FileScreen() {
         </View>
 
         <View style={styles.section}>
-          <SectionLabel>版本快照 · {snapshots.length} 个</SectionLabel>
+          <SectionLabel>时间</SectionLabel>
           <Card bordered style={styles.stack}>
-            {snapshots.length > 0 ? (
-              <View style={styles.row}>
-                {snapshots.map((v) => (
-                  <Chip key={v} tone="neutral">
-                    v{v}
-                  </Chip>
-                ))}
-              </View>
-            ) : (
-              <AppText variant="label" tone="textMuted">
-                还没有快照。第一次改动之后就会出现——每次变更都留下上一版的整份内容。
-              </AppText>
-            )}
-            <AppText variant="caption" tone="textFaint">
-              回滚走快照，不走命令重放：重放要求命令永久向后兼容，代价高且容易错。
-              文件只有几十 KB，不值得为省这点空间冒那个风险。
-            </AppText>
-            <View style={styles.actionRow}>
-              <AppText
-                variant="label"
-                tone="primary"
-                accessibilityRole="button"
-                accessibilityLabel="查看版本历史并回滚"
-                onPress={() => router.push('/history')}
-                suppressHighlighting
-                style={styles.textAction}
-              >
-                查看版本历史
-              </AppText>
+            <View style={styles.row}>
+              <Chip tone={clockSource === 'server' ? 'accent' : 'neutral'} selected={clockSetting.mode === 'live'}>
+                {clockSource === 'setting'
+                  ? `固定 ${clockSetting.date ?? '—'}`
+                  : clockSource === 'server'
+                    ? `跟随服务器 · ${today}`
+                    : `本机时间 · ${today}`}
+              </Chip>
+              {clockSetting.mode === 'debug' ? <Chip tone="warning">调试模式</Chip> : null}
             </View>
+
+            <AppText variant="caption" tone="textMuted">
+              今天是 {today}。
+              {clockSource === 'server'
+                ? '这个日期由服务端给出——客户端不自己做 UTC 到本地日期的换算，那件事最容易在深夜算错一天。'
+                : clockSource === 'setting'
+                  ? `调试模式下日期不会自己走：设了哪天就一直是哪天。真实的今天是 ${realToday}。`
+                  : '没连上服务端，用的是本机时间。'}
+            </AppText>
+
+            <View style={styles.row}>
+              <Chip
+                tone={clockSetting.mode === 'live' ? 'accent' : 'neutral'}
+                selected={clockSetting.mode === 'live'}
+                accessibilityLabel="时间跟随服务器"
+                onPress={() => setClock({ mode: 'live', date: null })}
+              >
+                跟随服务器
+              </Chip>
+              <Chip
+                tone={clockSetting.mode === 'debug' ? 'accent' : 'neutral'}
+                selected={clockSetting.mode === 'debug'}
+                accessibilityLabel="时间固定在指定日期"
+                onPress={() =>
+                  // 第一次切到调试模式时用「今天」当起点，否则学生得先自己想一个日期
+                  setClock({ mode: 'debug', date: clockSetting.date ?? today })
+                }
+              >
+                固定日期
+              </Chip>
+            </View>
+
+            {clockSetting.mode === 'debug' ? (
+              <>
+                {/*
+                  任意日期输入。做完快捷档位就收工是不够的——
+                  「想设定成哪天就是哪天」是调试模式的全部意义，
+                  而快捷档位只能往前走几天，回不到上个月，也回不到明年。
+                */}
+                <Input
+                  value={dateDraft}
+                  onChangeText={setDateDraft}
+                  onBlur={commitDate}
+                  onSubmitEditing={commitDate}
+                  placeholder="2026-10-19"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  accessibilityLabel="固定日期，格式为年-月-日"
+                  returnKeyType="done"
+                />
+                <View style={styles.row}>
+                  {[0, 1, 3, 5, 7].map((d) => (
+                    <Chip
+                      key={d}
+                      tone="neutral"
+                      // d = 0 用的是**真实的**今天，不是被固定的那个「今天」——
+                      // 否则这个档位在调试模式下是个原地打转的空操作
+                      accessibilityLabel={d === 0 ? '固定日期改为今天' : `固定日期改为 ${d} 天后`}
+                      onPress={() => setClock({ mode: 'debug', date: addDays(d === 0 ? realToday : today, d) })}
+                    >
+                      {d === 0 ? '今天' : `+${d} 天`}
+                    </Chip>
+                  ))}
+                </View>
+                {dateDraft && !isDay(dateDraft) ? (
+                  <AppText variant="caption" tone="warning">
+                    日期要写成 2026-10-19 这样，而且必须真实存在。
+                  </AppText>
+                ) : null}
+              </>
+            ) : null}
+
+            <AppText variant="caption" tone="textFaint">
+              演示和调试需要「今天就是某一天」，真实使用需要「今天就是今天」，这两个要求是互斥的。
+              所以它是一个显式的二选一，而不是一段藏在代码里的常量。
+            </AppText>
+          </Card>
+
+          <Card bordered style={styles.stack}>
+            <View style={styles.actionRow}>
+              <Chip
+                tone="neutral"
+                accessibilityLabel="模拟隔了五天回来"
+                onPress={() => void simulateDaysLater(5)}
+              >
+                模拟隔了 5 天回来
+              </Chip>
+            </View>
+            <AppText variant="caption" tone="textFaint">
+              把调试日期推到 5 天后、同时把「上次打开」拨回今天，然后立刻结一次账。
+              演示当天没法真的等一天，而这个按钮同时也在这条链路的测试入口上——
+              一个按钮同时服务演示和验证，比造两个入口好，它们不会各自跑偏。
+            </AppText>
           </Card>
         </View>
 
@@ -246,7 +371,7 @@ export default function FileScreen() {
             <AppText variant="label" tone="textMuted">
               把计划重置回仓库里的示例文件（examples/demo.studyplan）。演示前想回到干净状态时用。
               这份示例本身就是一个可演示的状态：里面已经有一条耗时超预估的任务，
-              切到复盘页直接就有偏差和调整可讲，不用现场攒。
+              在今日页点〔复盘〕直接就有偏差和调整可讲，不用现场攒。
             </AppText>
             <View style={styles.actionRow}>
               <AppText
@@ -259,6 +384,24 @@ export default function FileScreen() {
                 style={styles.textAction}
               >
                 重置为示例计划
+              </AppText>
+            </View>
+            {/*
+              「重做访谈」放在这里而不是今日页：它是个**演示/开发**动作
+              （学生不会想再做一遍访谈），原来占着今日页右上角那个位置，
+              把真正属于用户的动作（复盘）挤掉了。
+            */}
+            <View style={styles.actionRow}>
+              <AppText
+                variant="label"
+                tone="primary"
+                accessibilityRole="button"
+                accessibilityLabel="重新做一次访谈"
+                onPress={() => router.push('/onboarding')}
+                suppressHighlighting
+                style={styles.textAction}
+              >
+                重做访谈
               </AppText>
             </View>
           </Card>

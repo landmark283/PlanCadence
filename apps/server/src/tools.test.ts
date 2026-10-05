@@ -18,7 +18,7 @@ import type { ServerConfig } from './config.ts';
 import { fetchCodeforcesContests } from './tools/codeforces.ts';
 
 const TODAY = '2026-10-19';
-const config: ServerConfig = { port: 0, host: '127.0.0.1', llm: null };
+const config: ServerConfig = { port: 0, host: '127.0.0.1', llm: null, today: null, tz: 'Asia/Shanghai' };
 const makeApp = (): Promise<FastifyInstance> => buildApp(config, null, { logger: false });
 
 /** 造一个假的 fetch，只回一个响应 */
@@ -114,6 +114,8 @@ describe('fetchCodeforcesContests', () => {
       fetchImpl: fakeFetch(payload),
       // 今天比开赛日晚 10 天：倒计时会是负的
       today: day(10),
+      // 偏移给 0，好让这里算出来的「开赛日」和上面用 UTC 写的 day() 口径一致
+      offsetMinutes: 0,
     });
     assert.equal(r.contests.length, 1, '按真实时钟它还没开赛，不该被过滤掉');
     assert.equal(r.contests[0]!.deadline, null, '不该给一个会显示成"已截止"的截止日');
@@ -126,7 +128,11 @@ describe('fetchCodeforcesContests', () => {
       status: 'OK',
       result: [{ id: 8, name: 'Round 8', phase: 'BEFORE', startTimeSeconds: Math.floor(Date.now() / 1000) + 10 * 86_400 }],
     };
-    const r = await fetchCodeforcesContests({ fetchImpl: fakeFetch(payload), today: new Date().toISOString().slice(0, 10) });
+    const r = await fetchCodeforcesContests({
+      fetchImpl: fakeFetch(payload),
+      today: new Date().toISOString().slice(0, 10),
+      offsetMinutes: 0,
+    });
     assert.equal(r.contests.length, 1);
     assert.match(r.contests[0]!.deadline ?? '', /^\d{4}-\d{2}-\d{2}$/);
   });

@@ -21,17 +21,17 @@ export const PLAN_FILE_NAME = `plan${FILE_EXT}`;
  * 原子类型
  * ------------------------------------------------------------------ */
 
-const Id = z
+export const Id = z
   .string()
   .regex(/^[a-z][a-z0-9_]{0,31}$/, 'id 必须是小写字母开头、只含小写字母/数字/下划线的短标识');
-const DateStr = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, '日期必须是 YYYY-MM-DD');
+export const DateStr = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, '日期必须是 YYYY-MM-DD');
 const TimeStr = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, '时间必须是 HH:mm（24 小时制）');
 const StampStr = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?(Z|[+-]\d{2}:\d{2})?$/, '时间戳必须是 ISO 8601');
 /** 掌握度 / 难度：0..1 连续量，用小数避免"1-5 星"的粒度歧义 */
 const Ratio = z.number().min(0).max(1);
-const PositiveInt = z.number().int().positive();
+export const PositiveInt = z.number().int().positive();
 
 /* ------------------------------------------------------------------ *
  * 枚举
@@ -60,14 +60,35 @@ export const MilestoneStatus = z.enum(['pending', 'active', 'done', 'dropped']);
 export const ResourceKind = z.enum(['article', 'video', 'course', 'book', 'problem_set', 'contest', 'tool']);
 export type ResourceKind = z.infer<typeof ResourceKind>;
 
+/**
+ * 标记的颜色档位。
+ *
+ * 取值刻意和界面上的 `ChipTone` 完全一致，所以「标记支持自定义颜色」这件事
+ * 将来只需要往目录里写一个 tone，不需要另起一套颜色体系。
+ * （schema 不认识界面组件，所以这里是它自己的枚举；两边靠取值相同对齐，有测试盯着。）
+ */
+export const TagTone = z.enum(['neutral', 'accent', 'warning', 'success', 'danger']);
+export type TagTone = z.infer<typeof TagTone>;
+
 /* ------------------------------------------------------------------ *
  * 实体
  * ------------------------------------------------------------------ */
 
 export const Meta = z.object({
   title: z.string().min(1).max(120),
-  /** 本地时区的展示用时间戳，仅用于 UI，不参与排序逻辑 */
+  /** 本地时区的展示用时间戳，仅用于 UI，不参与任何判断 */
   created: StampStr,
+  /**
+   * 最后一次写入的逻辑时刻。
+   *
+   * **它不参与任何判断，只用于展示和历史回放。** 这句话以前是假的：
+   * `applyCommand` 当时拿它当硬性守卫（命令时间早于它就拒绝），
+   * 于是必须养一个假时钟来保证时间递增。那条守卫已经删了（见 commands.ts），
+   * 现在它才真的是一个纯展示字段。
+   *
+   * 因此调试模式下把日期往回拨时，**它可能倒退**。这是正确的：
+   * 它是逻辑时钟，不是墙上时钟。
+   */
   updated: StampStr,
   /** 作者/设备标识，多端合并时用得上，可选 */
   origin: z.string().max(64).optional(),
@@ -159,6 +180,18 @@ export const Task = z.object({
   /** 学生自评难度 0..1（null = 未评），是掌握度更新的输入之一 */
   difficulty: Ratio.nullable().default(null),
   resourceIds: z.array(Id).default([]),
+  /**
+   * 学生自己打的标记。
+   *
+   * **存的是标记 id，不是文字**——这是这个字段唯一的重点，也是它存在的理由。
+   * 以后要加「时间标记（影响排期）」或者「标记自定义颜色」，
+   * 改的是标记目录（`PlanFile.tags` / `plan/tags.ts`）和引擎，**任务上的数据不用动**。
+   *
+   * 认不出来的 id 在渲染时静默跳过（和 `resourceIds` 找不到资源同一个处理），
+   * **刻意不在 validatePlan 里查**：那样一个过期的标记 id 会让整条命令被拒，
+   * 而它顶多让一个胶囊不显示。代价和收益不成比例。
+   */
+  tags: z.array(Id).default([]),
   notes: z.string().max(2000).default(''),
 });
 export type Task = z.infer<typeof Task>;
@@ -193,8 +226,33 @@ export const Resource = z.object({
 export type Resource = z.infer<typeof Resource>;
 export type ResourceInput = z.input<typeof Resource>;
 
+/**
+ * 标记目录里的一条。
+ *
+ * 内置的四条写在代码里（`plan/tags.ts` 的 `BUILTIN_TAGS`），这里放的是
+ * **学生自定义的**——当前版本还没有创建自定义标记的界面，所以它通常是空的。
+ * 之所以现在就把它加进格式：任务上引用的是 id，得有个地方让那些 id 有定义；
+ * 而且它是 `.default([])`，旧文件照常解析，不需要迁移。
+ */
+export const Tag = z.object({
+  id: Id,
+  /** 卡片上那个胶囊里的字。短是硬要求——它要和状态、类型、时长挤在同一行 */
+  label: z.string().min(1).max(12),
+  tone: TagTone.default('neutral'),
+});
+export type Tag = z.infer<typeof Tag>;
+
 export const Review = z.object({
   at: StampStr,
+  /**
+   * 这条记录是什么。
+   *
+   * 为什么需要：v0.2 起 `plan.settle`（回归结账）也会往 `reviews` 里写一条。
+   * 没有这个字段时，「上次复盘是什么时候」会被一次结账污染——
+   * 而复盘页要显示「之前的复盘日志」，混进结账记录就是错的。
+   * 默认 `'review'`，所以加它之前写下的记录仍然读得进来，`SCHEMA_ID` 不用动。
+   */
+  kind: z.enum(['review', 'settle']).default('review'),
   /** 本周期应完成 vs 实际完成 */
   plannedTasks: z.number().int().min(0),
   completedTasks: z.number().int().min(0),
@@ -203,6 +261,17 @@ export const Review = z.object({
   notes: z.string().max(2000).default(''),
   /** 本次复盘产生了哪些调整（人话描述，用于回放） */
   adjustments: z.array(z.string().max(200)).default([]),
+  /**
+   * 这次复盘（或结账）问过什么、答了什么。
+   *
+   * 存下来是为了复盘页底部那个「之前的复盘」折叠区——学生回头看
+   * 「上个月我说的是时间不够，这个月还是」是有意义的。
+   * 存的是**问答对**而不是模型的原话，所以它很小，也不会有隐私问题。
+   */
+  dialogue: z
+    .array(z.object({ prompt: z.string().max(160), answer: z.string().max(300) }))
+    .max(8)
+    .default([]),
 });
 export type Review = z.infer<typeof Review>;
 
@@ -226,10 +295,29 @@ export const PlanFile = z.object({
   meta: Meta,
   goal: Goal,
   constraints: Constraints,
+  /**
+   * 学生档案：几年级、什么水平、每周有多少时间、哪儿弱。
+   *
+   * ## 为什么放进计划文件（而不是像设置那样留在设备上）
+   *
+   * 这份东西是**关于这个学生的**，不是关于这台设备的。放进计划文件之后：
+   *   · 重开 App 它还在（之前只在内存里，重启就忘了）；
+   *   · 换设备、把文件发给同学，上下文跟着走——对方看到的不再是一份
+   *     「只有日期没有来由」的任务表；
+   *   · 「跟 AI 说说」和找资料都有依据，不必每次都从计划内容反推。
+   *
+   * 类型上是 `unknown` 的宽松校验：`LearnerProfile` 住在 `llm/interview.ts`，
+   * 而 schema 层不该反向依赖 llm 层。真正的校验在 `parsePlan` 之后的
+   * `LearnerProfile.safeParse`（见 `plan/profile.ts`），校验不过就当没有，
+   * **不让一份坏档案把整份计划卡住**。
+   */
+  profile: z.unknown().nullable().default(null),
   competences: z.array(Competence).default([]),
   milestones: z.array(Milestone).default([]),
   tasks: z.array(Task).default([]),
   resources: z.array(Resource).default([]),
+  /** 标记目录（学生自定义的那部分）。内置的在代码里，见 plan/tags.ts */
+  tags: z.array(Tag).default([]),
   reviews: z.array(Review).default([]),
   history: z.array(HistoryEntry).default([]),
 });

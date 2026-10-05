@@ -27,6 +27,9 @@ import {
   type LearnerProfile,
   type PlanFile,
   type Resource,
+  type SettleNarrativeInput,
+  type TalkInput,
+  type TalkResult,
 } from '@sp/shared';
 
 import { isOfflineOnly, OFFLINE_NOTE } from '@/lib/demo-mode';
@@ -330,6 +333,170 @@ export async function attachResources(
     source: 'local',
     note,
   };
+}
+
+/* ------------------------------------------------------------------ *
+ * 时钟
+ * ------------------------------------------------------------------ */
+
+export type ServerTime = {
+  nowUtc: string;
+  offsetMinutes: number;
+  today: string;
+  zone: string;
+  /** 非 null 表示服务端时间被 SP_TODAY 冻结了。界面要如实显示 */
+  frozen: string | null;
+};
+
+/**
+ * 问服务端现在几点、今天是哪天。
+ *
+ * ## 日期为什么必须由服务端给
+ *
+ * `toISOString().slice(0, 10)` 是 UTC 的日期，东八区晚上 8 点之后会算成「明天」。
+ * 这个错误在服务端只可能犯一次，在客户端会犯很多次。而且客户端还要为此
+ * 依赖 `Intl`——Hermes 是否带它取决于构建配置，不能让「今天是哪天」
+ * 悬在一个可能不存在的 API 上。
+ *
+ * 失败返回 null，调用方退回设备时间并在界面上标明。
+ * **超时给得很短**：这一条是每次启动都要走的，而它只是对个表——
+ * 为了一个日期让学生等 25 秒是不可接受的，问不到就用本机时间。
+ */
+export async function fetchServerTime(): Promise<ServerTime | null> {
+  const base = serverUrl();
+  if (!base) return null;
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 4_000);
+  try {
+    const res = await fetch(`${base}/time`, { signal: ctrl.signal });
+    if (!res.ok) return null;
+    const data = (await res.json()) as Partial<ServerTime> & { ok?: boolean };
+    if (data?.ok !== true) return null;
+    if (typeof data.nowUtc !== 'string' || typeof data.today !== 'string') return null;
+    if (typeof data.offsetMinutes !== 'number' || !Number.isFinite(data.offsetMinutes)) return null;
+    return {
+      nowUtc: data.nowUtc,
+      offsetMinutes: data.offsetMinutes,
+      today: data.today,
+      zone: typeof data.zone === 'string' ? data.zone : '',
+      frozen: typeof data.frozen === 'string' ? data.frozen : null,
+    };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * 回归补账的叙述
+ * ------------------------------------------------------------------ */
+
+export type SettleNarrative = { narrative: string; source: Source; note: string };
+
+/**
+ * 让模型把补账事实说成人话。
+ *
+ * 失败时**不返回错误给界面**，而是让调用方继续用本机叙述（`settlePlanText`）——
+ * 和复盘页一样，这一屏在断网时必须仍然可用。返回的 `note` 会显示给学生，
+ * 所以降级原因要写得能看懂。
+ *
+ * 传上去的是 `SettleNarrativeInput`（只有算好的数字，**没有整份计划**），
+ * 所以服务端在结构上就不可能重算一遍。
+ */
+export async function fetchSettleNarrative(input: SettleNarrativeInput): Promise<ApiResult<SettleNarrative>> {
+  if (isOfflineOnly()) return { ok: false, error: OFFLINE_NOTE };
+
+  const res = await postJson('/plan/settle', input, REVIEW_TIMEOUT_MS);
+  if (!res.ok) return { ok: false, error: res.error };
+
+  const data = res.data as { ok?: boolean; narrative?: unknown; narrativeSource?: unknown; note?: unknown };
+  if (data?.ok !== true || typeof data.narrative !== 'string') {
+    return { ok: false, error: '服务端返回的叙述结构不合法' };
+  }
+  const fromLlm = data.narrativeSource === 'llm';
+  return {
+    ok: true,
+    value: {
+      narrative: data.narrative,
+      source: fromLlm ? 'llm' : 'local',
+      note: typeof data.note === 'string' ? data.note : 'ok',
+    },
+    source: fromLlm ? 'llm' : 'local',
+    note: typeof data.note === 'string' ? data.note : 'ok',
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * 跟 AI 说说（talk）
+ * ------------------------------------------------------------------ */
+
+/**
+ * 这一条**没有本机兜底**，所以它的返回形状和别的不一样。
+ *
+ * 别的接口都是「服务端不行就用本机」，所以有 `source: 'llm' | 'local'`。
+ * 这一条不行：自然语言理解本机做不到，硬做就得写一个只听得懂三句话的
+ * 关键词解析器，而学生试两次失败之后就不信它了——那比「明确说没连上」伤得多。
+ *
+ * 所以 `unavailable` 是一个**独立的状态**，不是一个错误：
+ * 界面对它显示的是「现在用不了 + 手动入口」，而不是「出错了」。
+ */
+export type TalkReply =
+  | { ok: true; result: TalkResult; note: string }
+  | { ok: false; unavailable: boolean; error: string };
+
+/**
+ * 说一句话。
+ *
+ * `history` 是唯一的口语状态（学生的话、AI 的复述与问题、学生对问题的回答
+ * 全在里面）——不另设一个 answers 字段，那会变成同一件事的第二个表示。
+ */
+export async function fetchTalk(input: TalkInput): Promise<TalkReply> {
+  const base = serverUrl();
+  if (!base) return { ok: false, unavailable: true, error: '未找到服务端地址' };
+
+  const ctrl = new AbortController();
+  // 这一条要调模型，给足时间；界面在等待期间显示「正在理解…」
+  const timer = setTimeout(() => ctrl.abort(), REVIEW_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${base}/plan/talk`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(input),
+      signal: ctrl.signal,
+    });
+    const data = (await res.json().catch(() => null)) as
+      | { ok?: boolean; result?: unknown; note?: unknown; error?: unknown; unavailable?: unknown }
+      | null;
+
+    if (!res.ok || data?.ok !== true) {
+      return {
+        ok: false,
+        // 服务端说「这一条现在用不了」时才标 unavailable；别的（400 之类）是错误
+        unavailable: data?.unavailable === true || res.status >= 500,
+        error: typeof data?.error === 'string' ? data.error : `服务端返回 ${res.status}`,
+      };
+    }
+
+    // 结构只做最小校验——对端不一定是我们的服务端（端口扫到别的服务、
+    // 代理返回 HTML 错误页都可能让 result 变成垃圾）
+    const r = data.result as TalkResult | undefined;
+    if (!r || typeof r.understanding !== 'string' || !Array.isArray(r.proposals)) {
+      return { ok: false, unavailable: false, error: '服务端返回的结构不合法' };
+    }
+    return { ok: true, result: r, note: typeof data.note === 'string' ? data.note : 'ok' };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    const timeout = /abort/i.test(msg);
+    return {
+      ok: false,
+      unavailable: true,
+      error: timeout ? `请求超时（${Math.round(REVIEW_TIMEOUT_MS / 1000)} 秒）` : msg,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /* ------------------------------------------------------------------ *

@@ -15,7 +15,7 @@ import { buildApp } from './app.ts';
 import type { ServerConfig } from './config.ts';
 
 const TODAY = '2026-10-19';
-const config: ServerConfig = { port: 0, host: '127.0.0.1', llm: null };
+const config: ServerConfig = { port: 0, host: '127.0.0.1', llm: null, today: null, tz: 'Asia/Shanghai' };
 
 /** 依次返回给定文本的 provider。用尽后重复最后一条 */
 function scripted(texts: string[]): LlmProvider & { calls: number } {

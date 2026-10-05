@@ -10,6 +10,7 @@
  */
 import { Task, Resource, validatePlan, clonePlan, SCHEMA_ID } from './schema.ts';
 import type { PlanFile, TaskStatus, TaskInput, ResourceInput, HistoryEntry } from './schema.ts';
+import type { TaskEditPatch } from './task-patch.ts';
 
 /* ------------------------------------------------------------------ *
  * 命令定义
@@ -23,12 +24,31 @@ export type Command =
   | { type: 'task.setPinned'; at: string; taskId: string; pinned: boolean }
   /** 设置「最早可安排日」：学生表达「这门等考完再说」 */
   | { type: 'task.setNotBefore'; at: string; taskId: string; notBefore: string | null }
-  | {
-      type: 'task.edit';
-      at: string;
-      taskId: string;
-      patch: Partial<Pick<PlanFile['tasks'][number], 'title' | 'notes' | 'type' | 'dependsOn' | 'resourceIds' | 'notBefore'>>;
-    }
+  /**
+   * 改一条任务的内容。
+   *
+   * ## 为什么 patch 这么宽
+   *
+   * 编辑页一次保存要改好几个字段（标题 + 备注 + 日期 + 标记）。如果每个字段
+   * 各发一条命令，中间任何一条被拒（字段非法、前置成环）都会让前面几条**已经生效**，
+   * 而**现在没有版本管理可以整体退回去**——学生看到的是「标题改了、日期没改」，
+   * 得自己想起来改了哪几处、各自原来是什么。一条命令则是要么全成要么全不成。
+   *
+   * 顺带两个次要理由：一次编辑在 history 里变成四行，回放时看不出这是一次动作；
+   * 以及一次编辑会打四遍写盘和四份 `versions/` 快照。
+   *
+   * ## 为什么不含 status / actualMin / difficulty
+   *
+   * 那三个是勾选框的业务（`task.setStatus`）。`components/task-card.tsx` 的文件头
+   * 写着「完成只走勾选框，避免两个入口改同一个字段」，而 `task.setStatus`
+   * 还挡着「前置未完成不许标完成」——搬进来就是同一件事的第二个实现。
+   *
+   * ## `scheduledFor` 和 `pinned` 的默认值
+   *
+   * 这里**不替学生猜**：patch 里有什么就写什么。界面上「手动改期默认上锁」
+   * 那条规则在 `task-patch.ts` 的 `withScheduledFor` 里，那里是纯函数、有测试。
+   */
+  | { type: 'task.edit'; at: string; taskId: string; patch: TaskEditPatch }
   | { type: 'task.add'; at: string; task: TaskInput }
   | { type: 'task.remove'; at: string; taskId: string }
   | { type: 'goal.update'; at: string; patch: Partial<PlanFile['goal']> }
@@ -55,17 +75,77 @@ export type Command =
     }
   /** 复盘：一次性把一批调整写回（学生在协商页逐条接受后） */
   | { type: 'plan.applyAdjustments'; at: string; applied: AppliedAdjustment[]; review?: PlanFile['reviews'][number] }
+  /**
+   * 回归补账：学生隔了若干天再打开时，把这段时间的账对齐。
+   *
+   * 为什么是**一条**命令而不是十几条：每一项各发一条会得到十几个版本号、
+   * 十几个快照，版本历史变成一屏看不出这是一次结算的行；更要命的是
+   * **一次回滚回不到整批之前**——学生发现结账错了，得回滚十几次，
+   * 中间任何一次失败都会停在半路。这和 `plan.attachResources` 当初
+   * 被做成一条命令而不是「resource.add + task.edit 循环」是同一个论证。
+   *
+   * 命令层在这里**只应用调用方陈述的事实，不自己判断哪些任务受影响**。
+   * 「哪些任务落在结算区间内」由 `settleFacts` 算，算完以 `pending` 传进来。
+   * 如果这里再算一遍，同一件事就有两个实现，两边口径迟早会不一样。
+   */
+  | {
+      type: 'plan.settle';
+      at: string;
+      /** 结算覆盖的日期区间，用于历史里说清「这几天」 */
+      from: string;
+      to: string;
+      /** 区间内本该完成但没做的。`carry` 只作用于这些 */
+      pending: string[];
+      /** 学生勾了「其实我做了」的 */
+      done: string[];
+      /** 学生勾了「放弃」的 */
+      skipped: string[];
+      carry: SettleCarry;
+      /** `compress` 时由调用方（引擎）算好的排期；其余情况留空 */
+      reschedule?: { taskId: string; scheduledFor: string | null }[];
+      /** 顺带留一条复盘记录 */
+      review: PlanFile['reviews'][number];
+    }
   /** 回滚：从快照恢复，调用方负责提供目标版本的完整计划 */
   | { type: 'plan.restore'; at: string; snapshot: PlanFile };
+
+/** 补账时「那批没做的怎么办」 */
+export type SettleCarry =
+  /** 放回待排池，重新排 */
+  | 'backlog'
+  /** 压缩到接下来几天（排期由调用方用引擎算好） */
+  | 'compress'
+  /** 先不动，学生自己安排。**仍然写一条记录**——「我看到了，我决定不管」本身是个决定 */
+  | 'hold';
 
 /** 协商页里被学生接受的单条调整 */
 export type AppliedAdjustment =
   | { kind: 'reschedule'; taskId: string; scheduledFor: string | null; reason: string }
   | { kind: 'estimate'; taskId: string; estimateMin: number; reason: string }
+  /**
+   * 一次改任务的好几个字段。
+   *
+   * 存在的理由：引擎给的建议是窄的（就改日期、或就改时长），
+   * 但**学生编辑一张建议卡时会一次改好几样**。没有这个种类，
+   * 学生改的第二个字段会**静默丢掉**——而这正是「界面说改了、实际没变」的老毛病。
+   */
+  | { kind: 'taskPatch'; taskId: string; patch: TaskEditPatch; reason: string }
   | { kind: 'goal'; patch: Partial<PlanFile['goal']>; reason: string }
   | { kind: 'addTask'; task: TaskInput; reason: string }
   | { kind: 'dropTask'; taskId: string; reason: string }
-  | { kind: 'addResource'; resource: ResourceInput; reason: string };
+  | { kind: 'addResource'; resource: ResourceInput; reason: string }
+  /**
+   * 改学生档案。
+   *
+   * 它**属于这里**，因为 `plan.profile` 本来就是计划文件的一部分：
+   * 一次复盘可能同时改任务和档案（「我每周只有 3 小时了」），
+   * 走两条路就不是原子的——中间失败会留下「计划改了、系统对他的认识没改」。
+   *
+   * `patch` 的类型刻意是 `Record<string, unknown>`：**字段白名单的校验发生在
+   * `proposal.ts` 的 `ProfilePatch`**（模型输出进来的那一刻），
+   * 所以到这一层时它已经是合法的。命令层不必为此反向依赖 `llm` 层。
+   */
+  | { kind: 'profile'; patch: Record<string, unknown>; reason: string };
 
 /* ------------------------------------------------------------------ *
  * 结果类型
@@ -80,10 +160,29 @@ export type ApplyResult =
  * ------------------------------------------------------------------ */
 
 export function applyCommand(plan: PlanFile, cmd: Command): ApplyResult {
-  if (cmd.at < plan.meta.updated) {
-    // 防止乱序写入把 version 推回去。多端场景下必须挡住。
-    return { ok: false, error: `命令时间 ${cmd.at} 早于计划更新时间 ${plan.meta.updated}` };
-  }
+  /**
+   * 【这里曾经有一条】`if (cmd.at < plan.meta.updated) return 拒绝`。
+   *
+   * 删掉了，理由值得写下来免得有人再加回去：
+   *
+   * 它的目的是防止乱序写入把 version 推回去。代价是**逼着「命令时间」必须真实递增**，
+   * 于是必须养一个假时钟（从一个写死的演示日期起步的单调游标），
+   * 因为示例计划的时间是演示口径，真实系统时间早于它，每一条命令都会被这条规则挡掉——
+   * 界面表现就是「点了没反应」，而且看不出原因。
+   *
+   * 而**现在没有任何地方真的需要它**：
+   *   · 客户端 `apply` 是同步 reducer，`state.plan` 顺序传递，两条命令不可能并发；
+   *   · 服务端生成的计划走的是 `installPlan`，直接替换整份计划，
+   *     **根本不经过这里**——这条守卫从来没有保护过它。
+   *
+   * 所以是删掉，而不是换一个替代品（比如命令带 `expectVersion`）：
+   * 当前架构里没有第二个写者，加了就是一个永远不会被触发的字段，
+   * 而永远不会被触发的代码最容易腐烂。
+   *
+   * 删掉之后 `cmd.at` 变成一个**纯粹的信息性字段**：它记录这笔改动发生在什么逻辑时刻，
+   * 写进 history 和 `meta.updated`，不参与任何判断。调试模式下日期可以被任意回拨，
+   * 所以它可能不单调——这是正确的，它是一个逻辑时钟，不是墙上时钟。
+   */
 
   const next: PlanFile = clonePlan(plan);
   const summary = execute(next, cmd);
@@ -100,6 +199,37 @@ export function applyCommand(plan: PlanFile, cmd: Command): ApplyResult {
   next.history = [...next.history, { at: cmd.at, cmd: cmd.type, summary } satisfies HistoryEntry];
 
   return { ok: true, plan: next, warnings: issues.filter((i) => i.level === 'warn').map((i) => i.message) };
+}
+
+/**
+ * 把一个字段补丁应用到一条任务上。
+ *
+ * `task.edit` 和 `plan.applyAdjustments` 的 `taskPatch` **共用这一份**。
+ * 两处各写一遍的话，总有一天会出现「编辑页改得进去、复盘卡片改不进去」
+ * （或者反过来），而且那种分歧不会报错。
+ *
+ * 【这里原来只有一句 `Object.assign(t, cmd.patch)`】——那是个洞。
+ * `applyCommand` 之后只跑 `validatePlan`，而那个函数**不管字段的合法性**
+ * （它管引用完整性、环、周预算、档期冲突）。于是 `patch: { title: '' }`
+ * 会 `ok: true` 地写进计划、写进磁盘，而**下一次启动解析这份文件就失败**，
+ * 界面变成「设备上的计划文件无法解析」并进入暂停写入的保护状态。
+ *
+ * 用整条 `Task.safeParse` 而不是逐字段 if：一次覆盖全部字段（空标题、负时长、
+ * 非法日期、超长备注），而且以后给 schema 加约束时这里自动跟着收紧。
+ */
+function applyTaskPatch(
+  next: PlanFile,
+  taskId: string,
+  patch: TaskEditPatch
+): string | { error: string } {
+  const t = next.tasks.find((x) => x.id === taskId);
+  if (!t) return { error: `未找到任务 ${taskId}` };
+  const parsed = Task.safeParse({ ...t, ...patch });
+  if (!parsed.success) {
+    return { error: `修改不合法：${parsed.error.issues[0]?.message ?? '未知'}` };
+  }
+  Object.assign(t, parsed.data);
+  return `任务「${t.title}」已修改`;
 }
 
 /** 就地修改 next，成功返回摘要字符串，失败返回 { error } */
@@ -159,10 +289,9 @@ function execute(next: PlanFile, cmd: Command): string | { error: string } {
     }
 
     case 'task.edit': {
-      const t = find(cmd.taskId);
-      if (!t) return { error: `未找到任务 ${cmd.taskId}` };
-      Object.assign(t, cmd.patch);
-      return `任务「${t.title}」已修改`;
+      const r = applyTaskPatch(next, cmd.taskId, cmd.patch);
+      if (typeof r !== 'string') return r;
+      return r;
     }
 
     case 'task.add': {
@@ -262,6 +391,11 @@ function execute(next: PlanFile, cmd: Command): string | { error: string } {
             t.estimateMin = a.estimateMin;
             break;
           }
+          case 'taskPatch': {
+            const r = applyTaskPatch(next, a.taskId, a.patch);
+            if (typeof r !== 'string') return r;
+            break;
+          }
           case 'goal':
             Object.assign(next.goal, a.patch);
             break;
@@ -283,10 +417,68 @@ function execute(next: PlanFile, cmd: Command): string | { error: string } {
             next.resources = [...next.resources, parsed.data];
             break;
           }
+          case 'profile': {
+            /**
+             * 合并而不是替换：学生说「每周只有 3 小时了」时只带一个字段，
+             * 其余的认识（什么水平、哪儿弱）不该被清掉。
+             *
+             * 这里**不校验字段名**——白名单在 `ProfilePatch` 那边，
+             * 而 `plan.profile` 在 schema 里是宽松类型，所以一份对不上的档案
+             * 最坏也只是被客户端忽略（`LearnerProfile.safeParse` 失败就当没有），
+             * 不会让整份计划读不出来。
+             */
+            const cur = (next.profile ?? {}) as Record<string, unknown>;
+            next.profile = { ...cur, ...a.patch };
+            break;
+          }
         }
       }
       if (cmd.review) next.reviews = [...next.reviews, { ...cmd.review, adjustments: cmd.applied.map((a) => a.reason) }];
       return `应用了 ${cmd.applied.length} 项调整`;
+    }
+
+    case 'plan.settle': {
+      const seen = new Set<string>();
+      for (const t of next.tasks) seen.add(t.id);
+
+      // 认不出来的 id 静默跳过：任务可能在结算页打开之后被删掉了。
+      // 一条对不上的 id 不该让整次结算失败——学生会丢掉其余全部的勾选
+      const doneIds = cmd.done.filter((id) => seen.has(id));
+      const skippedIds = cmd.skipped.filter((id) => seen.has(id));
+      const pendingIds = cmd.pending.filter((id) => seen.has(id));
+      const doneSet = new Set(doneIds);
+      const skippedSet = new Set(skippedIds);
+
+      for (const t of next.tasks) {
+        // 「放弃」用 skipped 而不是物理删除：删掉会让「学生主动放弃」
+        // 和「这项从来没存在过」变成同一件事，而它们在复盘时是完全不同的信息
+        if (doneSet.has(t.id)) t.status = 'done';
+        else if (skippedSet.has(t.id)) t.status = 'skipped';
+      }
+
+      let carried = 0;
+      if (cmd.carry !== 'hold') {
+        const target = new Map((cmd.reschedule ?? []).map((r) => [r.taskId, r.scheduledFor]));
+        for (const id of pendingIds) {
+          const t = find(id);
+          if (!t) continue;
+          // 学生刚在结算页勾了「做完了」或「放弃」的，不再当没做处理
+          if (t.status !== 'todo' && t.status !== 'doing' && t.status !== 'blocked') continue;
+          t.scheduledFor = cmd.carry === 'compress' ? (target.get(id) ?? null) : null;
+          // 过期任务是引擎算出来的，不是学生手排的，所以不上锁
+          t.pinned = false;
+          carried++;
+        }
+      }
+
+      const bits: string[] = [];
+      if (doneIds.length) bits.push(`${doneIds.length} 项确认完成`);
+      if (skippedIds.length) bits.push(`${skippedIds.length} 项放弃`);
+      if (carried) bits.push(`${carried} 项${cmd.carry === 'compress' ? '重新排期' : '移回待排池'}`);
+      if (cmd.carry === 'hold') bits.push('排期先不动');
+
+      next.reviews = [...next.reviews, { ...cmd.review, adjustments: bits }];
+      return `结账 ${cmd.from} ~ ${cmd.to}：${bits.join('，') || '没有变化'}`;
     }
 
     case 'plan.restore': {

@@ -17,7 +17,15 @@
  * 否则服务端按一套布局写、移动端按另一套读，问题只会在真机上暴露。
  */
 import { Directory, File, Paths } from 'expo-file-system';
-import { FILE_EXT, SNAPSHOT_DIR, planPath, snapshotPath, type PlanStorage } from '@sp/shared';
+import {
+  FILE_EXT,
+  SETTINGS_FILE_NAME,
+  SNAPSHOT_DIR,
+  planPath,
+  snapshotPath,
+  type PlanStorage,
+  type SettingsStorage,
+} from '@sp/shared';
 
 /** 应用私有文档目录。卸载应用才会清空，不进系统相册/下载目录 */
 const ROOT = Paths.document;
@@ -81,6 +89,25 @@ export const planStorage: PlanStorage = {
   async writeSnapshot(planId, version, text) {
     ensureDir(planId, SNAPSHOT_DIR);
     const f = fileAt(snapshotPath(planId, version));
+    if (!f.exists) f.create();
+    f.write(text);
+  },
+};
+
+/**
+ * 应用设置（调试时钟、上次打开）。
+ *
+ * 复用同一套存储后端，而不是给设置再写一遍原生/web 两套文件——
+ * `expo-file-system` 在 web 上不可用这件事只该被处理一次。
+ */
+export const appSettingsStorage: SettingsStorage = {
+  async readSettings() {
+    const f = fileAt(SETTINGS_FILE_NAME);
+    return f.exists ? f.text() : null;
+  },
+
+  async writeSettings(text) {
+    const f = fileAt(SETTINGS_FILE_NAME);
     if (!f.exists) f.create();
     f.write(text);
   },

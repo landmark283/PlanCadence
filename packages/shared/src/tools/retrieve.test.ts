@@ -40,6 +40,7 @@ const draftOf = (tasks: { id: string; title: string }[]): DraftOutput => ({
     actualMin: null,
     difficulty: null,
     resourceIds: [],
+    tags: [],
     notes: '',
   })),
   resources: [],

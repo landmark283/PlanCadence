@@ -133,6 +133,59 @@ describe('解析真实示例文件', () => {
   });
 });
 
+/**
+ * 格式演进的规矩：**只加带默认值的可选字段，不动 `SCHEMA_ID`**。
+ *
+ * 这条规矩值得单独一个用例，因为破坏它的代价不对称：改坏了不会有任何编译错误，
+ * 只会让学生在真机上看到「设备上的计划文件无法解析」——而那时他的计划
+ * 已经在盘上躺着了，界面还进入了暂停写入的保护状态。
+ *
+ * `tags`（任务标记）就是按这条规矩加的，所以这里拿一份**没有 tags 的旧文件**
+ * 来证明它读得进来。刻意手写而不是用 examples/：示例文件以后可能被人补上 tags，
+ * 那样这个用例就悄悄失去意义了。
+ */
+describe('格式演进：只加可选字段', () => {
+  const LEGACY = [
+    'schema: studyplan/v1',
+    'id: plan_legacy',
+    'version: 1',
+    'meta:',
+    '  title: 加 tags 之前写的文件',
+    "  created: '2026-10-06T20:00:00+08:00'",
+    "  updated: '2026-10-06T20:00:00+08:00'",
+    'goal:',
+    '  statement: 旧的目标',
+    'constraints:',
+    '  weeklyMinutes: 300',
+    'tasks:',
+    '  - { id: t_01, title: 旧任务, estimateMin: 30, type: read }',
+  ].join('\n');
+
+  it('没有 tags 的旧文件照常解析，并补成空数组', () => {
+    const r = parsePlan(LEGACY);
+    assert.equal(r.ok, true, r.ok ? '' : `${r.error}\n${formatIssues(r.issues)}`);
+    if (!r.ok) return;
+    assert.deepEqual(r.plan.tags, [], 'plan.tags 默认空目录');
+    assert.deepEqual(r.plan.tasks[0]!.tags, [], 'task.tags 默认空数组');
+  });
+
+  it('schema 版本号没有被这次改动动过', () => {
+    const r = parsePlan(LEGACY);
+    assert.equal(r.ok, true);
+    if (!r.ok) return;
+    assert.equal(r.plan.schema, SCHEMA_ID);
+  });
+
+  it('带 tags 的新文件同样读得进来（双向兼容）', () => {
+    const withTags = `${LEGACY}\ntags:\n  - { id: tag_mine, label: 我的, tone: success }`;
+    const r = parsePlan(withTags);
+    assert.equal(r.ok, true, r.ok ? '' : `${r.error}\n${formatIssues(r.issues)}`);
+    if (!r.ok) return;
+    assert.deepEqual(r.plan.tags.map((t) => t.id), ['tag_mine']);
+    assert.equal(r.plan.tags[0]!.tone, 'success');
+  });
+});
+
 describe('错误处理', () => {
   it('YAML 语法错误给出可读提示', () => {
     const r = parsePlan('schema: studyplan/v1\ntasks: [\n  - {id: ');

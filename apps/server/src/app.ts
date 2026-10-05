@@ -7,9 +7,13 @@ import type { FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
 import type { LlmProvider } from '@sp/llm-client';
 import type { ServerConfig } from './config.ts';
+import { createServerClock, type ServerClock } from './clock.ts';
 import { registerPlanRoutes } from './routes/plan.ts';
 import { registerInterviewRoutes } from './routes/interview.ts';
 import { registerToolRoutes } from './routes/tools.ts';
+import { registerTimeRoutes } from './routes/time.ts';
+import { registerSettleRoutes } from './routes/settle.ts';
+import { registerTalkRoutes } from './routes/talk.ts';
 
 export type BuildAppOptions = {
   /** 测试里传 false 静音日志 */
@@ -17,7 +21,7 @@ export type BuildAppOptions = {
 };
 
 export async function buildApp(
-  _config: ServerConfig,
+  config: ServerConfig,
   provider: LlmProvider | null,
   opts: BuildAppOptions = {}
 ): Promise<FastifyInstance> {
@@ -27,9 +31,21 @@ export async function buildApp(
   // 生产环境应改成白名单——这里留着 TODO 是因为比赛版就一个 App，不引入配置复杂度。
   await app.register(cors, { origin: true });
 
-  registerPlanRoutes(app, provider);
-  registerInterviewRoutes(app, provider);
-  registerToolRoutes(app);
+  /**
+   * 全服务唯一的时钟，从这里往下传。
+   *
+   * 以前每个路由各抄一份 `nowStamp()`、`codeforces` 直接读 `Date.now()`，
+   * 于是同一个「今天」有四个来源，并且真的已经矛盾过一次
+   * （演示日期是 2026-10-19，赛程却按真实的 2026-10-04 过滤）。
+   */
+  const clock: ServerClock = createServerClock(config);
+
+  registerPlanRoutes(app, provider, clock);
+  registerInterviewRoutes(app, provider, clock);
+  registerToolRoutes(app, clock);
+  registerTimeRoutes(app, clock);
+  registerSettleRoutes(app, provider);
+  registerTalkRoutes(app, provider, clock);
 
   return app;
 }

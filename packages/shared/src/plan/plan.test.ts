@@ -10,8 +10,8 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { emptyPlan, isoWeekKey, validatePlan } from './schema.ts';
-import type { PlanFile, TaskInput } from './schema.ts';
+import { PlanFile, Review, emptyPlan, isoWeekKey, validatePlan } from './schema.ts';
+import type { TaskInput } from './schema.ts';
 import { applyCommand } from './commands.ts';
 
 const T0 = '2026-10-06T20:00:00+08:00';
@@ -87,13 +87,331 @@ describe('依赖约束', () => {
   });
 });
 
-describe('并发与回滚', () => {
-  it('命令时间早于 meta.updated 时被拒绝', () => {
-    const r = applyCommand(freshPlan(), { type: 'task.add', at: '2026-10-05T00:00:00+08:00', task: taskA });
-    assert.equal(r.ok, false);
-    if (!r.ok) assert.ok(r.error.includes('早于计划更新时间'), r.error);
+describe('时钟不再参与写入判断（这是一条被删掉的规则）', () => {
+  /**
+   * 这里原本钉的是「命令时间早于 meta.updated 时被拒绝」。
+   * 那条规则被删掉了，所以测试反过来钉**它不该复活**。
+   */
+  it('命令时间早于 meta.updated 不再被拒绝', () => {
+    const p = must(freshPlan(), { type: 'task.add', at: T0, task: taskA });
+    // 故意发一条时间在过去的命令——调试模式把日期往回拨之后就是这个情况
+    const r = applyCommand(p, { type: 'task.add', at: '2026-10-05T00:00:00+08:00', task: taskB });
+    assert.equal(r.ok, true, '一旦这条规则复活，把桌面日期往回拨就会变成「点了没反应」');
+    if (r.ok) {
+      assert.equal(r.plan.tasks.length, 2);
+      assert.equal(r.plan.version, p.version + 1);
+    }
   });
 
+  it('meta.updated 会跟着命令倒退——它是逻辑时钟，不是墙上时钟', () => {
+    const p = must(freshPlan(), { type: 'task.add', at: T0, task: taskA });
+    const back = must(p, { type: 'task.add', at: '2026-10-05T00:00:00+08:00', task: taskB });
+    assert.equal(back.meta.updated, '2026-10-05T00:00:00+08:00');
+    assert.ok(back.meta.updated < p.meta.updated);
+  });
+
+  it('version 只增不减，即使命令时间是过去的', () => {
+    const p = must(freshPlan(), { type: 'task.add', at: T0, task: taskA });
+    const back = must(p, { type: 'task.add', at: '2026-10-05T00:00:00+08:00', task: taskB });
+    assert.equal(back.version, p.version + 1);
+  });
+});
+
+describe('回归补账：plan.settle', () => {
+  /**
+   * 一条复盘记录的夹具。
+   *
+   * 用 `Review.parse` 而不是手写对象字面量：手写的话，schema 每加一个字段
+   * （v0.3 加了 `kind` 和 `dialogue`）就要回来改十几处，而且报的是
+   * 「缺少属性」这种和测试意图无关的错。parse 会把默认值补齐。
+   */
+  const review = Review.parse({ at: T0, plannedTasks: 2, completedTasks: 1, notes: '' });
+
+  /** 三项任务排在 10/08 ~ 10/10，其中 t_b 依赖 t_a */
+  function overdue(): PlanFile {
+    let p = twoTasks();
+    p = must(p, { type: 'task.reschedule', at: T0, taskId: 't_a', scheduledFor: '2026-10-08' });
+    p = must(p, { type: 'task.reschedule', at: T0, taskId: 't_b', scheduledFor: '2026-10-09' });
+    return p;
+  }
+
+  it('一次结算只让版本 +1，历史只加一条', () => {
+    const p = overdue();
+    const next = must(p, {
+      type: 'plan.settle',
+      at: T0,
+      from: '2026-10-07',
+      to: '2026-10-10',
+      pending: ['t_a', 't_b'],
+      done: [],
+      skipped: [],
+      carry: 'backlog',
+      review,
+    });
+    assert.equal(next.version, p.version + 1, '十二项各发一条命令会得到十二个版本，历史就没法看了');
+    assert.equal(next.history.length, p.history.length + 1);
+    assert.equal(next.history.at(-1)!.cmd, 'plan.settle');
+  });
+
+  it('backlog 把没做的移回待排池，并且不上锁', () => {
+    const next = must(overdue(), {
+      type: 'plan.settle',
+      at: T0,
+      from: '2026-10-07',
+      to: '2026-10-10',
+      pending: ['t_a', 't_b'],
+      done: [],
+      skipped: [],
+      carry: 'backlog',
+      review,
+    });
+    for (const t of next.tasks) {
+      assert.equal(t.scheduledFor, null);
+      assert.equal(t.pinned, false, '过期任务是引擎算出来的，不是学生手排的');
+    }
+  });
+
+  it('done 里的项标记完成，并且不再被 carry 当作没做处理', () => {
+    const next = must(overdue(), {
+      type: 'plan.settle',
+      at: T0,
+      from: '2026-10-07',
+      to: '2026-10-10',
+      pending: ['t_a', 't_b'],
+      done: ['t_a'],
+      skipped: [],
+      carry: 'backlog',
+      review,
+    });
+    const a = next.tasks.find((t) => t.id === 't_a')!;
+    const b = next.tasks.find((t) => t.id === 't_b')!;
+    assert.equal(a.status, 'done');
+    assert.equal(a.scheduledFor, '2026-10-08', '做完了就不该被动排期');
+    assert.equal(b.status, 'todo');
+    assert.equal(b.scheduledFor, null);
+  });
+
+  it('「放弃」用 skipped，不物理删除', () => {
+    const p = overdue();
+    const next = must(p, {
+      type: 'plan.settle',
+      at: T0,
+      from: '2026-10-07',
+      to: '2026-10-10',
+      pending: ['t_a', 't_b'],
+      done: [],
+      skipped: ['t_b'],
+      carry: 'backlog',
+      review,
+    });
+    assert.equal(next.tasks.length, p.tasks.length, '删掉会让「主动放弃」和「从来没存在过」变成同一件事');
+    const b = next.tasks.find((t) => t.id === 't_b')!;
+    assert.equal(b.status, 'skipped');
+    assert.equal(b.scheduledFor, '2026-10-09', '放弃是状态变化，不是排期变化');
+  });
+
+  it('carry: hold 时排期原样不动，但照样留一条记录', () => {
+    const p = overdue();
+    const next = must(p, {
+      type: 'plan.settle',
+      at: T0,
+      from: '2026-10-07',
+      to: '2026-10-10',
+      pending: ['t_a', 't_b'],
+      done: [],
+      skipped: [],
+      carry: 'hold',
+      review,
+    });
+    assert.equal(next.tasks.find((t) => t.id === 't_a')!.scheduledFor, '2026-10-08');
+    assert.equal(next.reviews.length, p.reviews.length + 1, '「我看到了，我决定不管」本身是个决定');
+    assert.equal(next.version, p.version + 1);
+  });
+
+  it('carry: compress 用调用方给的排期', () => {
+    const next = must(overdue(), {
+      type: 'plan.settle',
+      at: T0,
+      from: '2026-10-07',
+      to: '2026-10-10',
+      pending: ['t_a', 't_b'],
+      done: [],
+      skipped: [],
+      carry: 'compress',
+      reschedule: [
+        { taskId: 't_a', scheduledFor: '2026-10-11' },
+        { taskId: 't_b', scheduledFor: '2026-10-12' },
+      ],
+      review,
+    });
+    assert.equal(next.tasks.find((t) => t.id === 't_a')!.scheduledFor, '2026-10-11');
+    assert.equal(next.tasks.find((t) => t.id === 't_b')!.scheduledFor, '2026-10-12');
+  });
+
+  it('carry: compress 时引擎没排下的落到待排池，而不是凭空消失', () => {
+    const next = must(overdue(), {
+      type: 'plan.settle',
+      at: T0,
+      from: '2026-10-07',
+      to: '2026-10-10',
+      pending: ['t_a', 't_b'],
+      done: [],
+      skipped: [],
+      carry: 'compress',
+      reschedule: [{ taskId: 't_a', scheduledFor: '2026-10-11' }],
+      review,
+    });
+    assert.equal(next.tasks.find((t) => t.id === 't_b')!.scheduledFor, null);
+  });
+
+  it('认不出来的 id 静默跳过，不让整次结算失败', () => {
+    const p = overdue();
+    const r = applyCommand(p, {
+      type: 'plan.settle',
+      at: T0,
+      from: '2026-10-07',
+      to: '2026-10-10',
+      pending: ['t_a', 't_b', 't_已经不存在了'],
+      done: ['t_已经不存在了'],
+      skipped: [],
+      carry: 'backlog',
+      review,
+    });
+    assert.equal(r.ok, true, '一条对不上的 id 不该让学生丢掉其余全部的勾选');
+    if (r.ok) {
+      assert.equal(r.plan.tasks.find((t) => t.id === 't_a')!.scheduledFor, null);
+      assert.equal(r.plan.tasks.find((t) => t.id === 't_b')!.scheduledFor, null);
+    }
+  });
+
+  it('结算会留一条复盘记录，而且写清做了什么', () => {
+    const next = must(overdue(), {
+      type: 'plan.settle',
+      at: T0,
+      from: '2026-10-07',
+      to: '2026-10-10',
+      pending: ['t_a', 't_b'],
+      done: ['t_a'],
+      skipped: [],
+      carry: 'backlog',
+      review,
+    });
+    const last = next.reviews.at(-1)!;
+    assert.equal(last.at, T0);
+    assert.ok(last.adjustments.length > 0, '复盘回放要能看出这次结算做了什么');
+    assert.ok(last.adjustments.some((s) => s.includes('确认完成')), last.adjustments.join('｜'));
+  });
+
+  it('结算历史里读得出结算区间', () => {
+    const next = must(overdue(), {
+      type: 'plan.settle',
+      at: T0,
+      from: '2026-10-07',
+      to: '2026-10-10',
+      pending: ['t_a', 't_b'],
+      done: [],
+      skipped: [],
+      carry: 'backlog',
+      review,
+    });
+    const summary = next.history.at(-1)!.summary;
+    assert.ok(summary.includes('2026-10-07'), summary);
+    assert.ok(summary.includes('2026-10-10'), summary);
+  });
+});
+
+describe('plan.applyAdjustments 里的 taskPatch（学生改了建议卡）', () => {
+  const one = () =>
+    must(freshPlan(), {
+      type: 'task.add',
+      at: T0,
+      task: { id: 't_a', title: '原本的标题', estimateMin: 30, type: 'read', scheduledFor: '2026-10-07' },
+    });
+
+  it('一次改好几个字段，只前进一版、只留一条历史', () => {
+    const p = one();
+    const next = must(p, {
+      type: 'plan.applyAdjustments',
+      at: T0,
+      applied: [
+        {
+          kind: 'taskPatch',
+          taskId: 't_a',
+          patch: { title: '改过的标题', estimateMin: 90, scheduledFor: '2026-10-09' },
+          reason: '你自己改的',
+        },
+      ],
+    });
+    assert.equal(next.tasks[0]!.title, '改过的标题');
+    assert.equal(next.tasks[0]!.estimateMin, 90);
+    assert.equal(next.tasks[0]!.scheduledFor, '2026-10-09');
+    assert.equal(next.version, p.version + 1);
+    assert.equal(next.history.length, p.history.length + 1);
+  });
+
+  it('和 task.edit 共用同一份校验：空标题照样被拒', () => {
+    const p = one();
+    const r = applyCommand(p, {
+      type: 'plan.applyAdjustments',
+      at: T0,
+      applied: [{ kind: 'taskPatch', taskId: 't_a', patch: { title: '' }, reason: 'r' }],
+    });
+    assert.equal(r.ok, false);
+    assert.match(r.ok ? '' : r.error, /修改不合法/);
+    assert.equal(p.tasks[0]!.title, '原本的标题', '被拒之后计划不能被改动');
+  });
+
+  it('负时长照样被拒', () => {
+    const p = one();
+    assert.equal(
+      applyCommand(p, {
+        type: 'plan.applyAdjustments',
+        at: T0,
+        applied: [{ kind: 'taskPatch', taskId: 't_a', patch: { estimateMin: -5 }, reason: 'r' }],
+      }).ok,
+      false
+    );
+  });
+
+  it('任务不存在时被拒', () => {
+    const p = one();
+    assert.equal(
+      applyCommand(p, {
+        type: 'plan.applyAdjustments',
+        at: T0,
+        applied: [{ kind: 'taskPatch', taskId: 't_没了', patch: { estimateMin: 30 }, reason: 'r' }],
+      }).ok,
+      false
+    );
+  });
+
+  it('档案补丁并进同一条命令（一次应用是原子的）', () => {
+    const p = one();
+    const next = must(p, {
+      type: 'plan.applyAdjustments',
+      at: T0,
+      applied: [
+        { kind: 'taskPatch', taskId: 't_a', patch: { estimateMin: 60 }, reason: 'r' },
+        { kind: 'profile', patch: { weeklyHours: 3 }, reason: '每周只有 3 小时了' },
+      ],
+    });
+    assert.equal(next.tasks[0]!.estimateMin, 60);
+    assert.deepEqual(next.profile, { weeklyHours: 3 });
+    assert.equal(next.version, p.version + 1, '任务和档案改在同一条命令里，只推一版');
+  });
+
+  it('档案是合并不是替换：没提到的字段保留', () => {
+    const p = { ...one(), profile: { level: 'basic', weeklyHours: 5 } };
+    const next = must(p, {
+      type: 'plan.applyAdjustments',
+      at: T0,
+      applied: [{ kind: 'profile', patch: { weeklyHours: 3 }, reason: 'r' }],
+    });
+    assert.deepEqual(next.profile, { level: 'basic', weeklyHours: 3 });
+  });
+});
+
+describe('并发与回滚', () => {
   it('回滚产生新的 version，历史只增不减', () => {
     const v1 = freshPlan();
     const v2 = must(v1, { type: 'task.add', at: T0, task: taskA });
@@ -364,5 +682,151 @@ describe('工具调用：plan.attachResources', () => {
       links: [{ taskId: 't_a', resourceIds: ['r1'] }],
     });
     assert.deepEqual(validatePlan(next).filter((i) => i.level === 'error'), []);
+  });
+});
+
+/**
+ * task.edit 的边界。
+ *
+ * 这一段盯着的是一个**曾经存在的洞**：`task.edit` 原先只有一句
+ * `Object.assign(t, cmd.patch)`，没有任何字段校验，而 `validatePlan` 不管字段合法性
+ * （它管引用、环、周预算、档期冲突）。于是 `patch: { title: '' }` 会
+ * `ok: true` 地写进磁盘，**下一次启动解析这份文件就失败**，
+ * 界面变成「设备上的计划文件无法解析」并暂停写入。
+ *
+ * 在此之前它是潜伏的（没有界面调用 task.edit）；编辑页是第一个调用者，
+ * 所以这些用例是编辑页上线的前提。
+ */
+describe('task.edit 的字段校验（曾经的洞）', () => {
+  const withOne = () => must(freshPlan(), { type: 'task.add', at: T0, task: { id: 't_a', title: '原本的标题', estimateMin: 30, type: 'read' } });
+
+  it('空标题被拒，而且计划没被改动', () => {
+    const p = withOne();
+    const r = applyCommand(p, { type: 'task.edit', at: T0, taskId: 't_a', patch: { title: '' } });
+    assert.equal(r.ok, false);
+    assert.match(r.ok ? '' : r.error, /修改不合法/);
+    assert.equal(p.tasks[0]!.title, '原本的标题');
+  });
+
+  it('全是空白的标题 schema 拦不住——所以界面侧必须 trim', () => {
+    const p = withOne();
+    // zod 的 min(1) 看的是长度，' ' 长度是 1，所以这一条**会通过**。
+    // 把它写下来是因为它是个陷阱：真正的把关在 task-patch.ts 的 taskPatch()（那里 trim）
+    const r = applyCommand(p, { type: 'task.edit', at: T0, taskId: 't_a', patch: { title: ' ' } });
+    assert.equal(r.ok, true);
+  });
+
+  it('负数或零时长被拒', () => {
+    const p = withOne();
+    assert.equal(applyCommand(p, { type: 'task.edit', at: T0, taskId: 't_a', patch: { estimateMin: 0 } }).ok, false);
+    assert.equal(applyCommand(p, { type: 'task.edit', at: T0, taskId: 't_a', patch: { estimateMin: -30 } }).ok, false);
+  });
+
+  it('小数时长被拒（estimateMin 是整分钟）', () => {
+    const p = withOne();
+    assert.equal(applyCommand(p, { type: 'task.edit', at: T0, taskId: 't_a', patch: { estimateMin: 30.5 } }).ok, false);
+  });
+
+  it('超长备注被拒', () => {
+    const p = withOne();
+    assert.equal(applyCommand(p, { type: 'task.edit', at: T0, taskId: 't_a', patch: { notes: 'x'.repeat(2001) } }).ok, false);
+  });
+
+  it('超长标题被拒', () => {
+    const p = withOne();
+    assert.equal(applyCommand(p, { type: 'task.edit', at: T0, taskId: 't_a', patch: { title: 'x'.repeat(161) } }).ok, false);
+  });
+
+  it('非法日期被拒', () => {
+    const p = withOne();
+    assert.equal(applyCommand(p, { type: 'task.edit', at: T0, taskId: 't_a', patch: { scheduledFor: '2026/10/20' } }).ok, false);
+    assert.equal(applyCommand(p, { type: 'task.edit', at: T0, taskId: 't_a', patch: { notBefore: '明天' } }).ok, false);
+  });
+
+  it('指向不存在的前置任务被拒（由 validatePlan 兜底）', () => {
+    const p = withOne();
+    const r = applyCommand(p, { type: 'task.edit', at: T0, taskId: 't_a', patch: { dependsOn: ['t_不存在'] } });
+    assert.equal(r.ok, false);
+  });
+
+  it('成环被拒', () => {
+    const p = twoTasks(); // t_b 依赖 t_a
+    const r = applyCommand(p, { type: 'task.edit', at: T0, taskId: 't_a', patch: { dependsOn: ['t_b'] } });
+    assert.equal(r.ok, false);
+    assert.match(r.ok ? '' : r.error, /环/);
+  });
+
+  it('不存在的任务被拒', () => {
+    const p = withOne();
+    assert.equal(applyCommand(p, { type: 'task.edit', at: T0, taskId: 't_没有', patch: { title: 'x' } }).ok, false);
+  });
+
+  it('合法 patch 写进去了，而且只 +1 版、只留一条历史', () => {
+    const p = withOne();
+    const next = must(p, {
+      type: 'task.edit',
+      at: T0,
+      taskId: 't_a',
+      patch: { title: '新标题', estimateMin: 60, scheduledFor: '2026-10-20', pinned: true, tags: ['tag_focus'] },
+    });
+    assert.equal(next.tasks[0]!.title, '新标题');
+    assert.equal(next.tasks[0]!.estimateMin, 60);
+    assert.equal(next.tasks[0]!.scheduledFor, '2026-10-20');
+    assert.deepEqual(next.tasks[0]!.tags, ['tag_focus']);
+    assert.equal(next.version, p.version + 1, '一次编辑只前进一版');
+    assert.equal(next.history.length, p.history.length + 1, '一次编辑只留一条历史');
+  });
+
+  it('改期不会顺手上锁——默认值是界面侧的事（task-patch 的 withScheduledFor）', () => {
+    const p = withOne();
+    const next = must(p, { type: 'task.edit', at: T0, taskId: 't_a', patch: { scheduledFor: '2026-10-20' } });
+    assert.equal(next.tasks[0]!.pinned, false);
+  });
+
+  it('patch 里没提到的字段一个字都不动', () => {
+    const p = must(withOne(), { type: 'task.edit', at: T0, taskId: 't_a', patch: { notes: '写点备注' } });
+    const next = must(p, { type: 'task.edit', at: T0, taskId: 't_a', patch: { estimateMin: 90 } });
+    assert.equal(next.tasks[0]!.notes, '写点备注');
+    assert.equal(next.tasks[0]!.title, '原本的标题');
+    assert.equal(next.tasks[0]!.type, 'read');
+  });
+
+  it('删除任务时，指向它的前置引用被清掉', () => {
+    const next = must(twoTasks(), { type: 'task.remove', at: T0, taskId: 't_a' });
+    assert.deepEqual(next.tasks[0]!.dependsOn, []);
+  });
+});
+
+describe('标记字段（tags）', () => {
+  it('新任务默认没有标记', () => {
+    const next = must(freshPlan(), { type: 'task.add', at: T0, task: { id: 't_a', title: 'A', estimateMin: 30, type: 'read' } });
+    assert.deepEqual(next.tasks[0]!.tags, []);
+  });
+
+  it('认不出来的标记 id 不会让命令失败（渲染时才跳过）', () => {
+    const p = must(freshPlan(), { type: 'task.add', at: T0, task: { id: 't_a', title: 'A', estimateMin: 30, type: 'read' } });
+    // 合法 id、但目录里没有这一条。这正是「陈旧标记」的样子
+    const next = must(p, { type: 'task.edit', at: T0, taskId: 't_a', patch: { tags: ['tag_ghost'] } });
+    assert.deepEqual(next.tasks[0]!.tags, ['tag_ghost'], 'id 存下来了，画不出来是渲染的事');
+    assert.deepEqual(validatePlan(next).filter((i) => i.level === 'error'), []);
+  });
+
+  it('标记 id 必须满足 Id 正则', () => {
+    const p = must(freshPlan(), { type: 'task.add', at: T0, task: { id: 't_a', title: 'A', estimateMin: 30, type: 'read' } });
+    assert.equal(
+      applyCommand(p, { type: 'task.edit', at: T0, taskId: 't_a', patch: { tags: ['Tag-Bad'] } }).ok,
+      false
+    );
+  });
+
+  it('plan.tags 目录默认是空的，但存在', () => {
+    assert.deepEqual(freshPlan().tags, []);
+  });
+
+  it('自定义目录能过校验，且同 id 不重复', () => {
+    const p = { ...freshPlan(), tags: [{ id: 'tag_mine', label: '我的', tone: 'success' as const }] };
+    const parsed = PlanFile.safeParse(p);
+    assert.equal(parsed.success, true);
+    assert.deepEqual(validatePlan(PlanFile.parse(p)).filter((i) => i.level === 'error'), []);
   });
 });

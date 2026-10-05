@@ -10,3 +10,5 @@
 export * from './advisor.ts';
 export * from './interview.ts';
 export * from './planner.ts';
+export * from './settle-narrative.ts';
+export * from './talk.ts';

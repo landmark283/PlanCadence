@@ -8,13 +8,14 @@
  * 草稿状态由父组件持有（`Draft`），控件本身是无状态的。
  * 这样「上一题」回去改答案时，把草稿重新初始化即可，不用让控件各自维护历史。
  */
-import { Pressable, StyleSheet, TextInput, View } from 'react-native';
+import { Pressable, StyleSheet, View } from 'react-native';
 import type { Answer, QuestionSpec } from '@sp/shared';
 
 import { AppText } from '@/components/app-text';
 import { Chip } from '@/components/chip';
+import { Input as InputBase, type InputProps } from '@/components/input';
 import { addDays, daysBetween, fmtMonthDay } from '@/lib/dates';
-import { radius, space, touchTarget, type as typeScale, useTokens } from '@/theme';
+import { radius, space, useTokens } from '@/theme';
 
 export type Draft = {
   single: string | null;
@@ -419,29 +420,14 @@ function OptionRow({
   );
 }
 
-function Input({
-  multiline = false,
-  ...rest
-}: { multiline?: boolean } & React.ComponentProps<typeof TextInput>) {
-  const t = useTokens();
-  return (
-    <TextInput
-      multiline={multiline}
-      placeholderTextColor={t.textFaint}
-      style={[
-        styles.input,
-        typeScale.body,
-        {
-          color: t.text,
-          backgroundColor: t.surfaceSunken,
-          borderColor: t.border,
-          minHeight: multiline ? 96 : touchTarget,
-          textAlignVertical: multiline ? 'top' : 'center',
-        },
-      ]}
-      {...rest}
-    />
-  );
+/**
+ * 输入框直接用共享组件。
+ *
+ * 原来这里自己写了一份，和文件页那份是两套圆角/内边距/占位色；
+ * 两处各写一遍的下场就是这个项目里已经见过的：一段悄悄跑偏，另一段没人改。
+ */
+function Input({ multiline = false, ...rest }: InputProps) {
+  return <InputBase multiline={multiline} {...rest} />;
 }
 
 const styles = StyleSheet.create({
@@ -475,12 +461,6 @@ const styles = StyleSheet.create({
     borderWidth: 1.5,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  input: {
-    borderRadius: radius.md,
-    borderWidth: 1,
-    paddingHorizontal: space.md,
-    paddingVertical: space.md,
   },
   rangeRow: {
     flexDirection: 'row',

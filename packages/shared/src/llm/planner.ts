@@ -230,6 +230,9 @@ export function localDraft(profile: LearnerProfile, today: string): DraftOutput 
         actualMin: null,
         difficulty: null,
         resourceIds: [],
+        // 标记由学生自己打，生成时不预设：系统猜不出「这题我错了好几次」这种事，
+        // 而猜错一次标记比不打标记更烦人（学生得先删掉再打自己的）
+        tags: [],
         notes: placed ? '' : '排不进当前可用时段，先放待排池',
       });
     });

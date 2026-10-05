@@ -2,12 +2,26 @@
  * 任务卡 —— 今日页的主体，学生待最久的组件。
  *
  * 设计取舍：
- *  1. **默认折叠，点「调整」展开**。一张卡上同时摆 5 个状态按钮 + 6 个时长档位，
+ *  1. **默认折叠，点内容区展开**。一张卡上同时摆 5 个状态按钮 + 6 个时长档位，
  *     一屏就是一片按钮墙。折叠态只留「是什么 + 多重 + 什么状态」，
  *     需要改的时候再展开。
- *  2. **元信息胶囊不可点**。让它们可点会和「整块标题区展开」抢同一个手势，
- *     嵌套 Pressable 的行为在 Web 和原生上还不一致。改状态/改时长统一在展开区。
+ *  2. **点 = 展开，长按 = 进编辑页**。这两个手势不会互相误触发：
+ *     `react-native-web` 的 `PressResponder` 里明确写着长按之后不调 `onPress`
+ *     （`isPressCanceledByLongPress`），原生端 `Pressability` 同规则。
  *  3. **完成只走勾选框**。状态选择器里刻意没有「已完成」，避免两个入口改同一个字段。
+ *
+ * ## 为什么整块内容区都是按钮，而勾选框在它外面
+ *
+ * 原来这里是一个 26×22 的「调整」小字，学生按了觉得没反应
+ * （触控区太小、颜色太弱、`hitSlop` 在原生上还会被父视图边界裁掉）。
+ * 现在整块内容区（标题 + 胶囊 + 备注）就是那个按钮，高度远超 44。
+ *
+ * 但**勾选框是它的兄弟，不是子元素**：`Pressable` 套 `Pressable` 在
+ * `react-native-web` 上点击会冒泡、在原生上靠 responder 系统，两边行为不一致。
+ * 把勾选框放到外层，嵌套这件事在构造上就不存在——点勾选框只会勾选。
+ *
+ * 元信息胶囊现在**落在可点区里面**，点它们就是展开。这不冲突：
+ * 它们自己不带 `onPress`，所以没有两个动作抢同一个手势。
  *
  * ## 划掉是怎么做的（这段别随手改）
  *
@@ -24,17 +38,17 @@
  */
 import { useEffect, useRef } from 'react';
 import { Animated, Linking, Pressable, StyleSheet, View } from 'react-native';
-import type { Resource, Task, TaskStatus } from '@sp/shared';
+import type { Resource, Tag, Task, TaskStatus } from '@sp/shared';
 
 import { AppText } from '@/components/app-text';
-import { Card } from '@/components/card';
+import { Card, ChipAction } from '@/components/card';
 import { CheckControl } from '@/components/check-control';
 import { Chip } from '@/components/chip';
 import { Collapsible } from '@/components/collapsible';
 import { fmtMinutes, fmtMonthDay } from '@/lib/dates';
 import { easingOut } from '@/lib/motion';
 import { ESTIMATE_PRESETS, SELECTABLE_STATUSES, STATUS_LABEL, STATUS_TONE, TYPE_LABEL } from '@/lib/task-meta';
-import { motion, space, touchTarget, useTokens } from '@/theme';
+import { motion, space, touchTarget, type as typeScale, useTokens } from '@/theme';
 
 export type TaskCardProps = {
   task: Task;
@@ -48,6 +62,8 @@ export type TaskCardProps = {
    * 这件事必须在任务卡上看见才算数。
    */
   resources?: Resource[];
+  /** 学生自己打的标记。调用方已经查过目录，认不出来的 id 在那里就被丢掉了 */
+  tags?: Tag[];
   expanded: boolean;
   onToggleExpand: () => void;
   onToggleDone: () => void;
@@ -61,6 +77,8 @@ export type TaskCardProps = {
    * 只会说"本期没有发现偏差"——「自适应」也就成了一句空话。
    */
   onSetActual: (min: number) => void;
+  /** 进编辑页。点展开区里的「编辑这一项」，或长按整张卡 */
+  onOpenEditor: () => void;
   /** 待排池里的任务用下沉面，与已排期的区分开 */
   variant?: 'scheduled' | 'backlog';
 };
@@ -72,12 +90,14 @@ export function TaskCard({
   task,
   deps,
   resources = [],
+  tags = [],
   expanded,
   onToggleExpand,
   onToggleDone,
   onSetStatus,
   onSetEstimate,
   onSetActual,
+  onOpenEditor,
   variant = 'scheduled',
 }: TaskCardProps) {
   const t = useTokens();
@@ -95,6 +115,18 @@ export function TaskCard({
     }).start();
   }, [done, strike]);
 
+  /** 折角箭头。0 = 收起，1 = 展开，转 180°。只动 transform，能走原生驱动 */
+  const chevron = useRef(new Animated.Value(expanded ? 1 : 0)).current;
+  const chevronRotate = chevron.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '180deg'] });
+  useEffect(() => {
+    Animated.timing(chevron, {
+      toValue: expanded ? 1 : 0,
+      duration: motion.fast,
+      easing: easingOut,
+      useNativeDriver: true,
+    }).start();
+  }, [expanded, chevron]);
+
   return (
     <Card tone={variant === 'backlog' ? 'sunken' : 'surface'} bordered>
       <View style={styles.head}>
@@ -104,7 +136,16 @@ export function TaskCard({
           onToggle={onToggleDone}
         />
 
-        <View style={styles.main}>
+        {/* 整块内容区就是那个按钮。勾选框在它外面，所以两者不会互相触发 */}
+        <Pressable
+          accessibilityRole="button"
+          accessibilityState={{ expanded }}
+          accessibilityLabel={expanded ? `收起「${task.title}」的调整` : `展开「${task.title}」的调整`}
+          accessibilityHint="长按可以直接编辑这一项"
+          onPress={onToggleExpand}
+          onLongPress={onOpenEditor}
+          style={({ pressed }) => [styles.main, pressed ? styles.pressed : null]}
+        >
           <View style={styles.titleRow}>
             <View style={styles.title}>
               <AppText variant="subtitle" tone={done ? 'textFaint' : 'text'}>
@@ -124,20 +165,20 @@ export function TaskCard({
                 </AppText>
               </Animated.View>
             </View>
-            {/* 用 Pressable 包一层而不是给 Text 加 hitSlop：RN 0.86 的 TextProps
-                里没有 hitSlop，而且把触控区撑到 44 也不该改变文字自身的位置 */}
-            <Pressable
-              accessibilityRole="button"
-              accessibilityState={{ expanded }}
-              accessibilityLabel={expanded ? `收起「${task.title}」的调整` : `调整「${task.title}」`}
-              onPress={onToggleExpand}
-              hitSlop={space.md}
-              style={({ pressed }) => [styles.adjustBtn, pressed ? styles.pressed : null]}
+
+            {/* 折角箭头。它是**提示**不是按钮——真按钮是整块内容区。
+                只对读屏隐藏：名字已经由外层的 accessibilityLabel 说清楚了，
+                再念一个「⌄」没有意义 */}
+            <Animated.Text
+              aria-hidden
+              style={[
+                typeScale.subtitle,
+                styles.chevron,
+                { color: t.textFaint, transform: [{ rotate: chevronRotate }] },
+              ]}
             >
-              <AppText variant="label" tone="textFaint">
-                {expanded ? '收起' : '调整'}
-              </AppText>
-            </Pressable>
+              ⌄
+            </Animated.Text>
           </View>
 
           <View style={styles.metaRow}>
@@ -161,6 +202,13 @@ export function TaskCard({
             {variant === 'backlog' && task.notBefore ? (
               <Chip tone="warning">最早 {fmtMonthDay(task.notBefore)}</Chip>
             ) : null}
+            {/* 学生自己打的标记排在最后：前面全是系统算出来的事实（状态/类型/时长/
+                实际/上锁/资料），标记是学生自己加的话。混在一起会分不清谁说的 */}
+            {tags.map((tag) => (
+              <Chip key={tag.id} tone={tag.tone}>
+                {tag.label}
+              </Chip>
+            ))}
           </View>
 
           {task.notes ? (
@@ -168,7 +216,7 @@ export function TaskCard({
               {task.notes}
             </AppText>
           ) : null}
-        </View>
+        </Pressable>
       </View>
 
       {blockedBy.length > 0 ? (
@@ -181,6 +229,23 @@ export function TaskCard({
           Collapsible 自己管挂载时机，收起动画播完才卸载 */}
       <Collapsible open={expanded}>
         <View style={[styles.panel, { borderTopColor: t.border }]}>
+          {/*
+            编辑入口放在展开区**第一行**：原来这一行只有状态和预估这些快捷项，
+            想改标题、备注、日期、前置的人根本找不到地方。
+            长按卡片才是主入口，但**长按对读屏完全不可见**，
+            所以这个看得见的胶囊不是多余的——一个只有长按的入口等于没有入口。
+          */}
+          <View style={styles.editRow}>
+            <ChipAction
+              label="编辑这一项"
+              accessibilityLabel={`编辑「${task.title}」`}
+              onPress={onOpenEditor}
+            />
+            <AppText variant="caption" tone="textFaint">
+              也可以长按卡片
+            </AppText>
+          </View>
+
           <Field label="状态">
             {SELECTABLE_STATUSES.map((s) => (
               <Chip key={s} tone={STATUS_TONE[s]} selected={task.status === s} onPress={() => onSetStatus(s)}>
@@ -284,9 +349,12 @@ const styles = StyleSheet.create({
     alignItems: 'flex-start',
     gap: space.sm,
   },
-  /** 3pt：让 label（行高 19）的基线落到 subtitle（行高 24）的基线上 */
-  adjustBtn: {
-    paddingTop: 3,
+  /**
+   * 折角箭头。1pt 让它的中线落到标题第一行的中线上
+   * （subtitle 行高 24，`⌄` 在字身里偏下，所以要往上抬一点）。
+   */
+  chevron: {
+    paddingTop: 1,
   },
   pressed: {
     opacity: 0.6,
@@ -328,6 +396,12 @@ const styles = StyleSheet.create({
   field: {
     flexDirection: 'row',
     alignItems: 'flex-start',
+    gap: space.md,
+  },
+  /** 编辑入口那一行。它自己的高度由里面的 ChipAction 撑着（44） */
+  editRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
     gap: space.md,
   },
   fieldLabel: {

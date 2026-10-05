@@ -4,22 +4,21 @@
  * 每一天是一格，格子里从上到下是「周几 / 日号 / 负载条」。
  * 负载条用长度而不是颜色表达多少：颜色已经被状态占用了，
  * 再来一套颜色编码，学生就得同时维护两张对照表。
+ *
+ * **这一格的内容和配色现在住在 `components/day-cell.tsx`**，月历用的是同一个组件
+ * （区别只有「周几」那一行由列头承担，所以 `showWeekday` 传 false）。
+ * 这里只剩「排成一行」和「一行的格子该多高」。
  */
-import { Pressable, StyleSheet, View } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 
-import { AppText } from '@/components/app-text';
-import { dayOfMonth, weekdayShort } from '@/lib/dates';
-import { radius, space, touchTarget, useTokens } from '@/theme';
+import { DayCell, type DayLoad } from '@/components/day-cell';
+import { space, touchTarget } from '@/theme';
 
-export type WeekStripDay = {
-  day: string;
-  /** 当天排了多少分钟 */
-  minutes: number;
-  /** 当天完成了几项、共几项 */
-  done: number;
-  total: number;
-  isToday: boolean;
-};
+/** 周条的格子比月历高一档：它要多放一行「周几」小字 */
+export const STRIP_CELL_MIN_HEIGHT = touchTarget + 22;
+
+/** 这个类型就是「一天的负载」，和月历共用 */
+export type WeekStripDay = DayLoad;
 
 export type WeekStripProps = {
   days: WeekStripDay[];
@@ -29,53 +28,20 @@ export type WeekStripProps = {
   fullAt?: number;
 };
 
-export function WeekStrip({ days, selected, onSelect, fullAt = 120 }: WeekStripProps) {
-  const t = useTokens();
-
+export function WeekStrip({ days, selected, onSelect, fullAt }: WeekStripProps) {
   return (
     <View style={styles.row}>
-      {days.map((d) => {
-        const active = d.day === selected;
-        const pct = Math.min(1, d.minutes / fullAt);
-        const allDone = d.total > 0 && d.done === d.total;
-
-        return (
-          <Pressable
-            key={d.day}
-            accessibilityRole="button"
-            accessibilityState={{ selected: active }}
-            accessibilityLabel={`${dayOfMonth(d.day)} 日，${d.total} 项任务${d.isToday ? '，今天' : ''}`}
-            onPress={() => onSelect(d.day)}
-            style={({ pressed }) => [
-              styles.cell,
-              active ? { backgroundColor: t.primarySoft } : null,
-              pressed ? styles.pressed : null,
-            ]}
-          >
-            <AppText variant="caption" tone={active ? 'primary' : 'textFaint'}>
-              {weekdayShort(d.day)}
-            </AppText>
-
-            <AppText variant="subtitle" tone={active || d.isToday ? 'primary' : 'textMuted'}>
-              {dayOfMonth(d.day)}
-            </AppText>
-
-            <View style={[styles.track, { backgroundColor: t.surfaceSelected }]}>
-              {d.minutes > 0 ? (
-                <View
-                  style={{
-                    // 负载条宽度用百分比：格宽是 flex 撑出来的，拿不到像素值
-                    width: `${Math.round(pct * 100)}%` as `${number}%`,
-                    height: '100%',
-                    backgroundColor: allDone ? t.success : t.primary,
-                    opacity: active ? 1 : 0.75,
-                  }}
-                />
-              ) : null}
-            </View>
-          </Pressable>
-        );
-      })}
+      {days.map((d) => (
+        <DayCell
+          key={d.day}
+          load={d}
+          selected={d.day === selected}
+          showWeekday
+          fullAt={fullAt}
+          onPress={() => onSelect(d.day)}
+          style={styles.cell}
+        />
+      ))}
     </View>
   );
 }
@@ -86,22 +52,6 @@ const styles = StyleSheet.create({
     gap: space.xs,
   },
   cell: {
-    flex: 1,
-    minHeight: touchTarget + 22,
-    paddingVertical: space.sm,
-    borderRadius: radius.sm,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: space.xxs,
-  },
-  pressed: {
-    opacity: 0.6,
-  },
-  track: {
-    width: '72%',
-    height: 3,
-    borderRadius: radius.pill,
-    overflow: 'hidden',
-    marginTop: space.xxs,
+    minHeight: STRIP_CELL_MIN_HEIGHT,
   },
 });

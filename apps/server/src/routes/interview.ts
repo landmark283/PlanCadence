@@ -38,6 +38,7 @@ import {
 } from '@sp/shared';
 import { completeJson } from '@sp/llm-client';
 import type { LlmProvider } from '@sp/llm-client';
+import type { ServerClock } from '../clock.ts';
 import { fetchCodeforcesContests } from '../tools/codeforces.ts';
 
 const DateStr = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, '日期必须是 YYYY-MM-DD');
@@ -63,17 +64,11 @@ const DraftBody = z.object({
   useLlm: z.boolean().optional(),
 });
 
-function todayLocal(): string {
-  const d = new Date();
-  const p = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-}
-
-function nowStamp(): string {
-  return new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
-}
-
-export function registerInterviewRoutes(app: FastifyInstance, provider: LlmProvider | null): void {
+export function registerInterviewRoutes(
+  app: FastifyInstance,
+  provider: LlmProvider | null,
+  clock: ServerClock,
+): void {
   /**
    * 出下一题。
    *
@@ -150,8 +145,8 @@ export function registerInterviewRoutes(app: FastifyInstance, provider: LlmProvi
       return reply.code(400).send({ ok: false, error: '请求体不合法', issues: body.error.issues });
     }
     const { profile } = body.data;
-    const today = body.data.today ?? todayLocal();
-    const at = body.data.at ?? nowStamp();
+    const today = body.data.today ?? clock.today();
+    const at = body.data.at ?? clock.nowStamp();
     const id = body.data.id ?? `plan_${Date.now().toString(36)}`;
     const title = body.data.title ?? (profile.goalStatement ? profile.goalStatement.slice(0, 40) : '学习计划');
 
@@ -171,7 +166,11 @@ export function registerInterviewRoutes(app: FastifyInstance, provider: LlmProvi
       note: '客户端要求降级，未抓取赛事',
     };
     if (body.data.useLlm !== false) {
-      liveContests = await fetchCodeforcesContests({ today });
+      liveContests = await fetchCodeforcesContests({
+        nowMs: clock.nowMs(),
+        today,
+        offsetMinutes: clock.offsetMinutes(),
+      });
     }
 
     const attach = (draft: Parameters<typeof withToolResources>[0]) => {

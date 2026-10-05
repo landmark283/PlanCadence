@@ -16,7 +16,15 @@
  * 而端到端脚本会因此验证不到任何持久化。localStorage 至少跨刷新存活，
  * 足以让流程脚本证明「写完能读回来」。
  */
-import { FILE_EXT, SNAPSHOT_DIR, planPath, snapshotPath, type PlanStorage } from '@sp/shared';
+import {
+  FILE_EXT,
+  SETTINGS_FILE_NAME,
+  SNAPSHOT_DIR,
+  planPath,
+  snapshotPath,
+  type PlanStorage,
+  type SettingsStorage,
+} from '@sp/shared';
 
 const PREFIX = 'studyplan:';
 
@@ -67,5 +75,15 @@ export const planStorage: PlanStorage = {
 
   async writeSnapshot(planId, version, text) {
     store()?.setItem(key(snapshotPath(planId, version)), text);
+  },
+};
+
+export const appSettingsStorage: SettingsStorage = {
+  async readSettings() {
+    return store()?.getItem(key(SETTINGS_FILE_NAME)) ?? null;
+  },
+
+  async writeSettings(text) {
+    store()?.setItem(key(SETTINGS_FILE_NAME), text);
   },
 };

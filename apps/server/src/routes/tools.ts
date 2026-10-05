@@ -18,6 +18,7 @@ import { attachPlanResources, localContestFeed, searchResources } from '@sp/shar
 // 于是 `import { Level }` 会在运行时抛 "does not provide an export named 'Level'"，
 // 而 tsc 因为是按类型解析的、不会报错。必须写成 import type
 import type { Level, Resource } from '@sp/shared';
+import type { ServerClock } from '../clock.ts';
 import { fetchCodeforcesContests } from '../tools/codeforces.ts';
 
 const LevelSchema = z.enum(['beginner', 'basic', 'intermediate', 'advanced']);
@@ -51,7 +52,19 @@ const PlanBody = z.object({
   live: z.boolean().optional(),
 });
 
-export function registerToolRoutes(app: FastifyInstance): void {
+export function registerToolRoutes(app: FastifyInstance, clock: ServerClock): void {
+  /**
+   * 抓实时赛程时统一带上时钟。
+   *
+   * 「现在」和「今天」必须一起给：以前这里只传 `today`，而 `codeforces.ts`
+   * 内部自己读 `Date.now()`——同一个请求里两个时间来源，演示时必然打架。
+   */
+  const liveArgs = (today?: string) => ({
+    nowMs: clock.nowMs(),
+    today: today ?? clock.today(),
+    offsetMinutes: clock.offsetMinutes(),
+  });
+
   /**
    * 按一段文本检索资料。**纯本地**，不碰网络，所以永远不会失败。
    */
@@ -100,7 +113,7 @@ export function registerToolRoutes(app: FastifyInstance): void {
 
     const fetched = await fetchCodeforcesContests({
       ...(limit !== undefined ? { limit } : {}),
-      ...(today ? { today } : {}),
+      ...liveArgs(today),
     });
     if (!fetched.contests.length) {
       req.log.warn({ note: fetched.note }, 'contest feed unavailable, using local library only');
@@ -134,7 +147,7 @@ export function registerToolRoutes(app: FastifyInstance): void {
     let extra: Resource[] = [];
     let note = '只用本地资料库';
     if (live !== false) {
-      const fetched = await fetchCodeforcesContests({ ...(today ? { today } : {}) });
+      const fetched = await fetchCodeforcesContests(liveArgs(today));
       extra = fetched.contests;
       note = fetched.note;
     }

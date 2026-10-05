@@ -36,17 +36,17 @@ function plan(): PlanFile {
     {
       id: 't_1', title: '通读「动态规划」的核心概念', milestoneId: 'm_1', dependsOn: [],
       estimateMin: 45, type: 'read', status: 'done', scheduledFor: '2026-10-21',
-      pinned: false, notBefore: null, actualMin: 60, difficulty: null, resourceIds: [], notes: '',
+      pinned: false, notBefore: null, actualMin: 60, difficulty: null, resourceIds: [], tags: ['tag_focus'], notes: '',
     },
     {
       id: 't_2', title: '「动态规划」模板题 3 道', milestoneId: 'm_1', dependsOn: ['t_1'],
       estimateMin: 90, type: 'practice', status: 'todo', scheduledFor: '2026-10-22',
-      pinned: false, notBefore: null, actualMin: null, difficulty: null, resourceIds: [], notes: '先做 01 背包',
+      pinned: false, notBefore: null, actualMin: null, difficulty: null, resourceIds: [], tags: [], notes: '先做 01 背包',
     },
     {
       id: 't_3', title: '还没排的复习', milestoneId: null, dependsOn: [],
       estimateMin: 30, type: 'review', status: 'skipped', scheduledFor: null,
-      pinned: false, notBefore: null, actualMin: null, difficulty: null, resourceIds: [], notes: '',
+      pinned: false, notBefore: null, actualMin: null, difficulty: null, resourceIds: [], tags: [], notes: '',
     },
   ];
   p.resources = [
